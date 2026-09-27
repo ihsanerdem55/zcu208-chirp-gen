@@ -13,10 +13,7 @@ set repo_dir   [file normalize $script_dir/..]
 set proj_name  zcu208_chirp
 set proj_dir   [file normalize $repo_dir/vivado/$proj_name]
 set bd_name    chirp_bd
-set ADD_ILA    0        ;# 1 = add a System ILA on the DAC stream.
-                        ;# Default 0: with the ILA on the DAC clock, Vivado also clocks the
-                        ;# debug hub from the DAC clock, so if the RF-DAC tile does not start,
-                        ;# JTAG-to-AXI is unreachable. Enable only after the DAC is known to work.
+if {![info exists ADD_ILA]} { set ADD_ILA 1 }
 
 # ------------------------------------------------------------------ project
 catch {close_project}
@@ -24,7 +21,7 @@ create_project $proj_name $proj_dir -part xczu48dr-fsvg1517-2-e -force
 set bp [lindex [lsort [get_board_parts -quiet *zcu208*]] end]
 if {$bp eq ""} {
     puts "ERROR: ZCU208 board files not found. Install them from Vivado: Tools > Vivado Store > Boards."
-    return
+    error "Cannot build without ZCU208 board files"
 }
 set_property board_part $bp [current_project]
 puts "INFO: using board part $bp"
@@ -37,76 +34,54 @@ add_files -norecurse [list \
     $repo_dir/rtl/chirp_gen_wrapper.v \
     $repo_dir/rtl/sincos_qw.mem ]
 add_files -fileset constrs_1 -norecurse $repo_dir/constraints/zcu208_chirp.xdc
-# pins + clock groups refer to IP clocks that only exist after synthesis -> implementation only
-set_property USED_IN_SYNTHESIS false [get_files zcu208_chirp.xdc]
+add_files -fileset constrs_1 -norecurse $repo_dir/constraints/chirp_timing.xdc
+set_property USED_IN_SYNTHESIS false [get_files chirp_timing.xdc]
+set_property PROCESSING_ORDER LATE [get_files chirp_timing.xdc]
+if {$ADD_ILA} {
+    set_property STEPS.OPT_DESIGN.TCL.PRE $repo_dir/tcl/debug_hub.tcl [get_runs impl_1]
+}
 update_compile_order -fileset sources_1
 
 # ------------------------------------------------------------ block design
 create_bd_design $bd_name
 
 # --- RF Data Converter -------------------------------------------------------
-# DAC TILE 230, CHANNEL 0.
-# On the ZCU208 the CLK104 LMK04828 reference clock (245.76 MHz) is wired only to
-# DAC tile 230 (and ADC tile 226). Using tile 230 means the tile gets its clock
-# directly: no clock distribution, no extra tiles. (Tile 228 needs distribution
-# through 229 and 230 and otherwise stops at power-up state 6.)
-# Naming: DAC tile index 0..3 = tiles 228..231, so tile 230 = index 2:
-#   DAC2_* tile settings, DAC_*20 channel settings, ports dac2_clk, clk_dac2,
-#   s2_axis_aclk/aresetn, s20_axis, vout20.
+# CLK104 connector supplies DAC tile 228, NOT tile 230 (UG1410).
+# Tile 230 has separate external SMA clock inputs. Use tile 228/channel 0
+# with the local PLL and a 245.76 MHz LMK reference, without tile forwarding.
 set rfdc [create_bd_cell -type ip -vlnv xilinx.com:ip:usp_rf_data_converter rfdc]
-
-# Enable the new channel first, then switch everything else off. Each property is
-# set separately so a name that differs in your Vivado version only prints a
-# warning; anything that fails must be set by hand in the IP GUI.
-set rfdc_cfg [dict create \
-    DAC_Slice20_Enable       true  \
-    DAC2_Enable              1     \
-    DAC2_Sampling_Rate       5.89824 \
-    DAC2_PLL_Enable          true  \
-    DAC2_Refclk_Freq         245.760 \
-    DAC2_Outclk_Freq         184.320 \
-    DAC2_Multi_Tile_Sync     false \
-    DAC_Interpolation_Mode20 8     \
-    DAC_Data_Width20         8     \
-    DAC_Mixer_Type20         2     \
-    DAC_Mixer_Mode20         0     \
-    DAC_NCO_Freq20           1.0   \
-    DAC_Invsinc_Ctrl20       true  \
-    DAC_Slice00_Enable       false \
-    DAC_Slice02_Enable       false \
-    DAC_Slice10_Enable       false \
-    DAC_Slice12_Enable       false \
-    DAC_Slice22_Enable       false \
-    DAC_Slice30_Enable       false \
-    DAC_Slice32_Enable       false \
-    DAC0_Enable              0     \
-    DAC1_Enable              0     \
-    DAC3_Enable              0     \
-    ADC_Slice00_Enable       false \
-    ADC_Slice02_Enable       false \
-    ADC_Slice10_Enable       false \
-    ADC_Slice12_Enable       false \
-    ADC_Slice20_Enable       false \
-    ADC_Slice22_Enable       false \
-    ADC_Slice30_Enable       false \
-    ADC_Slice32_Enable       false ]
-dict for {k v} $rfdc_cfg {
-    if {[catch {set_property CONFIG.$k $v $rfdc} err]} {
-        puts "WARNING: could not set rfdc CONFIG.$k = $v -> set it in the IP GUI ($err)"
+set rfdc_cfg [list \
+    CONFIG.Axiclk_Freq             100.000 \
+    CONFIG.DAC0_Enable            1 \
+    CONFIG.DAC0_Clock_Source      4 \
+    CONFIG.DAC0_Clock_Dist        0 \
+    CONFIG.DAC0_Sampling_Rate     5.89824 \
+    CONFIG.DAC0_PLL_Enable        true \
+    CONFIG.DAC0_Refclk_Freq        245.760 \
+    CONFIG.DAC0_Outclk_Freq        184.320 \
+    CONFIG.DAC0_Fabric_Freq        184.320 \
+    CONFIG.DAC0_Multi_Tile_Sync    false \
+    CONFIG.DAC_Slice00_Enable      true \
+    CONFIG.DAC_Data_Type00         0 \
+    CONFIG.DAC_Interpolation_Mode00 8 \
+    CONFIG.DAC_Data_Width00        8 \
+    CONFIG.DAC_Mixer_Type00        2 \
+    CONFIG.DAC_Mixer_Mode00        0 \
+    CONFIG.DAC_NCO_Freq00          1000.0 \
+    CONFIG.DAC_Nyquist00           1 \
+    CONFIG.DAC_Invsinc_Ctrl00       true]
+# Set related parameters atomically; never silently build a different RF path.
+foreach tile {0 1 2 3} {
+    lappend rfdc_cfg CONFIG.ADC${tile}_Enable 0
+    if {$tile != 0} { lappend rfdc_cfg CONFIG.DAC${tile}_Enable 0 }
+    foreach block {0 2} {
+        lappend rfdc_cfg CONFIG.ADC_Slice${tile}${block}_Enable false
+        if {$tile != 0 || $block != 0} {
+            lappend rfdc_cfg CONFIG.DAC_Slice${tile}${block}_Enable false
+        }
     }
 }
-
-# --- sanity check: I/Q stream must be 128 bits (4 complex samples x 32 bits) ----
-set nb [get_property -quiet CONFIG.TDATA_NUM_BYTES [get_bd_intf_pins -quiet rfdc/s20_axis]]
-if {$nb ne "16"} {
-    puts "=================================================================="
-    puts "CRITICAL: rfdc/s20_axis is [expr {$nb eq "" ? "missing" : "[expr {$nb*8}] bits wide"}], expected 128 bits."
-    puts "  Open the rfdc IP. Only DAC tile 230 channel 0 enabled: Mixer Type = Fine,"
-    puts "  Mixer Mode = I/Q -> Real, Interpolation = 8x, Samples per AXI4-Stream"
-    puts "  cycle = 8, Sampling rate 5898.24 MSPS, PLL on, Reference clock 245.76 MHz,"
-    puts "  Required AXI4-Stream clock 184.32 MHz, NCO 1000 MHz, Inverse sinc on."
-    puts "=================================================================="
-}
+set_property -dict $rfdc_cfg $rfdc
 
 # --- AXI clock: board USER_SI570_C0 (300 MHz) -> Clocking Wizard -> 100 MHz ---
 # Explicit top-level port (pins AP20/AP19 in the XDC, taken from the ZCU208 board
@@ -121,7 +96,7 @@ create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:diff_clock_rtl:1.0 sy
 set_property CONFIG.FREQ_HZ 300000000 [get_bd_intf_ports sysclk_300]
 connect_bd_intf_net [get_bd_intf_ports sysclk_300] [get_bd_intf_pins clk_wiz_axi/CLK_IN1_D]
 
-# --- DAC fabric clock: rfdc/clk_dac2 -> Clocking Wizard (MMCM) ---------------
+# --- DAC fabric clock: rfdc/clk_dac0 -> Clocking Wizard (MMCM) ---------------
 set clk_wiz_dac [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz clk_wiz_dac]
 set_property -dict [list \
     CONFIG.PRIM_SOURCE {No_buffer} \
@@ -149,7 +124,7 @@ set chirp [create_bd_cell -type module -reference chirp_gen_wrapper chirp_gen_0]
 set axi_clk [get_bd_pins clk_wiz_axi/clk_out1]
 set dac_clk [get_bd_pins clk_wiz_dac/clk_out1]
 
-connect_bd_net $axi_clk [get_bd_pins rst_axi/slowest_sync_clk] [get_bd_pins jtag_axi_0/aclk] \
+connect_bd_net -net axi_clk_100m $axi_clk [get_bd_pins rst_axi/slowest_sync_clk] [get_bd_pins jtag_axi_0/aclk] \
     [get_bd_pins axi_sc/aclk] [get_bd_pins rfdc/s_axi_aclk] [get_bd_pins chirp_gen_0/s_axi_aclk]
 connect_bd_net [get_bd_pins clk_wiz_axi/locked] [get_bd_pins rst_axi/dcm_locked]
 connect_bd_net [get_bd_ports cpu_reset] [get_bd_pins rst_axi/ext_reset_in] [get_bd_pins rst_dac/ext_reset_in]
@@ -160,17 +135,17 @@ connect_bd_intf_net [get_bd_intf_pins jtag_axi_0/M_AXI] [get_bd_intf_pins axi_sc
 connect_bd_intf_net [get_bd_intf_pins axi_sc/M00_AXI]   [get_bd_intf_pins chirp_gen_0/s_axi]
 connect_bd_intf_net [get_bd_intf_pins axi_sc/M01_AXI]   [get_bd_intf_pins rfdc/s_axi]
 
-connect_bd_net [get_bd_pins rfdc/clk_dac2] [get_bd_pins clk_wiz_dac/clk_in1]
-connect_bd_net $dac_clk [get_bd_pins rst_dac/slowest_sync_clk] [get_bd_pins chirp_gen_0/dac_clk] \
-    [get_bd_pins rfdc/s2_axis_aclk]
+connect_bd_net [get_bd_pins rfdc/clk_dac0] [get_bd_pins clk_wiz_dac/clk_in1]
+connect_bd_net -net dac_clk_184m $dac_clk [get_bd_pins rst_dac/slowest_sync_clk] [get_bd_pins chirp_gen_0/dac_clk] \
+    [get_bd_pins rfdc/s0_axis_aclk]
 connect_bd_net [get_bd_pins clk_wiz_dac/locked] [get_bd_pins rst_dac/dcm_locked]
 connect_bd_net [get_bd_pins rst_dac/peripheral_aresetn] [get_bd_pins chirp_gen_0/dac_rst_n] \
-    [get_bd_pins rfdc/s2_axis_aresetn]
-connect_bd_intf_net [get_bd_intf_pins chirp_gen_0/m_axis] [get_bd_intf_pins rfdc/s20_axis]
+    [get_bd_pins rfdc/s0_axis_aresetn]
+connect_bd_intf_net [get_bd_intf_pins chirp_gen_0/m_axis] [get_bd_intf_pins rfdc/s00_axis]
 
 # dedicated RF pins (placed automatically, no XDC needed)
-make_bd_intf_pins_external [get_bd_intf_pins rfdc/dac2_clk]
-make_bd_intf_pins_external [get_bd_intf_pins rfdc/vout20]
+make_bd_intf_pins_external [get_bd_intf_pins rfdc/dac0_clk]
+make_bd_intf_pins_external [get_bd_intf_pins rfdc/vout00]
 if {[llength [get_bd_intf_pins -quiet rfdc/sysref_in]]} {
     make_bd_intf_pins_external [get_bd_intf_pins rfdc/sysref_in]
 }
@@ -178,28 +153,26 @@ if {[llength [get_bd_intf_pins -quiet rfdc/sysref_in]]} {
 create_bd_port -dir O trig_out
 connect_bd_net [get_bd_pins chirp_gen_0/trig_out] [get_bd_ports trig_out]
 
-# --- optional System ILA on the DAC stream -------------------------------------
-# Slot 0 is switched to AXI4-Stream (default is AXI4-MM, which is why a pin called
-# SLOT_0_AXIS did not exist). Wrapped in catch: the ILA is a debug extra and must
-# never stop the build.
+# Native ILA avoids System ILA monitor-slot type/version mismatches.
+# Full stream + handshake + pulse marker and eight signed 16-bit lane probes.
+# ILA samples in the DAC domain; debug_hub.tcl keeps the hub on independent AXI.
 if {$ADD_ILA} {
-    if {[catch {
-        set ila [create_bd_cell -type ip -vlnv xilinx.com:ip:system_ila ila_dac]
-        set_property -dict [list \
-            CONFIG.C_MON_TYPE {MIX} \
-            CONFIG.C_NUM_MONITOR_SLOTS {1} \
-            CONFIG.C_SLOT_0_INTF_TYPE {xilinx.com:interface:axis_rtl:1.0} \
-            CONFIG.C_NUM_OF_PROBES {1} \
-            CONFIG.C_DATA_DEPTH {4096} ] $ila
-        set axis_net [get_bd_intf_nets -of_objects [get_bd_intf_pins chirp_gen_0/m_axis]]
-        connect_bd_intf_net -intf_net $axis_net [get_bd_intf_pins chirp_gen_0/m_axis] \
-            [get_bd_intf_pins ila_dac/SLOT_0_AXIS]
-        connect_bd_net [get_bd_pins chirp_gen_0/trig_out] [get_bd_pins ila_dac/probe0]
-        connect_bd_net $dac_clk [get_bd_pins ila_dac/clk]
-        connect_bd_net [get_bd_pins rst_dac/peripheral_aresetn] [get_bd_pins ila_dac/resetn]
-    } err]} {
-        puts "WARNING: System ILA not added ($err). The design works without it."
-        catch {delete_bd_objs [get_bd_cells -quiet ila_dac]}
+    set ila [create_bd_cell -type ip -vlnv xilinx.com:ip:ila ila_dac]
+    set cfg [list CONFIG.C_NUM_OF_PROBES 12 CONFIG.C_DATA_DEPTH 4096 \
+        CONFIG.C_PROBE0_WIDTH 128 CONFIG.C_PROBE1_WIDTH 1 \
+        CONFIG.C_PROBE2_WIDTH 1 CONFIG.C_PROBE3_WIDTH 1]
+    for {set n 4} {$n < 12} {incr n} { lappend cfg CONFIG.C_PROBE${n}_WIDTH 16 }
+    set_property -dict $cfg $ila
+    connect_bd_net $dac_clk [get_bd_pins ila_dac/clk]
+    foreach {probe signal} {0 m_axis_tdata 1 trig_out 2 m_axis_tvalid 3 m_axis_tready} {
+        connect_bd_net [get_bd_pins chirp_gen_0/$signal] [get_bd_pins ila_dac/probe$probe]
+    }
+    for {set n 0} {$n < 8} {incr n} {
+        set slice [create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice iq_slice_$n]
+        set_property -dict [list CONFIG.DIN_WIDTH 128 CONFIG.DIN_FROM [expr {16*$n+15}] \
+            CONFIG.DIN_TO [expr {16*$n}] CONFIG.DOUT_WIDTH 16] $slice
+        connect_bd_net [get_bd_pins chirp_gen_0/m_axis_tdata] [get_bd_pins iq_slice_$n/Din]
+        connect_bd_net [get_bd_pins iq_slice_$n/Dout] [get_bd_pins ila_dac/probe[expr {$n+4}]]
     }
 }
 
@@ -211,8 +184,7 @@ foreach {pat off rng} {*chirp_gen_0* 0x40000000 64K *rfdc* 0x40040000 256K} {
     set seg [get_bd_addr_segs -quiet -filter "NAME =~ $pat" \
                  -of_objects [get_bd_addr_spaces jtag_axi_0/Data]]
     if {$seg eq ""} {
-        puts "WARNING: address segment $pat not found; set it in the Address Editor ($off, $rng)"
-        continue
+        error "Address segment $pat not found; expected $off / $rng"
     }
     set_property range  $rng $seg
     set_property offset $off $seg
@@ -220,6 +192,11 @@ foreach {pat off rng} {*chirp_gen_0* 0x40000000 64K *rfdc* 0x40040000 256K} {
 
 regenerate_bd_layout
 validate_bd_design
+set stream [get_bd_intf_pins rfdc/s00_axis]
+set nb [get_property CONFIG.TDATA_NUM_BYTES $stream]
+if {$nb != 16} { error "RFDC stream must be 128 bits, got $nb bytes" }
+set fabric [get_property CONFIG.DAC0_Fabric_Freq $rfdc]
+if {abs($fabric - 184.32) > 0.001} { error "RFDC requires $fabric MHz, expected 184.32 MHz" }
 save_bd_design
 
 # ------------------------------------------------------------ HDL wrapper
@@ -231,7 +208,7 @@ update_compile_order -fileset sources_1
 
 puts "=================================================================="
 puts " Block design ready."
-puts " 1. Double-click rfdc: only DAC tile 230 ch0 enabled (see settings above)."
+puts " 1. Double-click rfdc: only DAC tile 228 ch0 enabled (see settings above)."
 puts " 2. trig_out is on LED0 (AR19); change it in the XDC if you want another pin."
 puts " 3. Flow Navigator > Generate Bitstream."
 puts "=================================================================="

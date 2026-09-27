@@ -20,7 +20,7 @@ set ::FCLK       [expr {$::FS_BB / $::LANES}]       ;# 184.32 MHz fabric clock
 
 set ::CHIRP_BASE 0x40000000
 set ::RFDC_BASE  0x40040000
-set ::DAC_TILE   2                  ;# tile 230 = DAC tile index 2 (228=0 ... 231=3)
+set ::DAC_TILE   0                  ;# CLK104 reference -> tile 228 (index 0)
 set ::DAC_BLOCK  0                  ;# channel 0
 
 # register offsets (chirp_axil_regs.sv)
@@ -34,7 +34,7 @@ proc hw_init {} {
     reset_hw_axi $::AXI
     puts "Using $::AXI"
     set id [rd32 [expr {$::CHIRP_BASE + $::R(ID)}]]
-    if {$id != 0x43485250} { puts "WARNING: chirp_gen ID = [format 0x%08X $id], expected 0x43485250" } \
+    if {$id != 0x43485250} { error "chirp_gen ID = [format 0x%08X $id], expected 0x43485250" } \
     else                   { puts "chirp_gen found (ID CHRP)" }
 }
 
@@ -53,17 +53,38 @@ proc rd32 {addr} {
 proc creg_wr {name val} { wr32 [expr {$::CHIRP_BASE + $::R($name)}] $val }
 proc creg_rd {name}     { return [rd32 [expr {$::CHIRP_BASE + $::R($name)}]] }
 
-# copy all registers into the DAC clock domain and wait for the handshake
-proc chirp_apply {} {
-    creg_wr APPLY 1
-    for {set i 0} {$i < 100} {incr i} {
-        if {([creg_rd STATUS] & 0x2) == 0} { return }
+# Check for an existing request BEFORE writing any new parameters or APPLY.
+# Retoggling APPLY while the DAC clock is stopped can cancel the pending request.
+proc chirp_wait_idle {{timeout_ms 1000}} {
+    set deadline [expr {[clock milliseconds] + $timeout_ms}]
+    while {1} {
+        set st [creg_rd STATUS]
+        if {($st & 1) == 0} { error "DAC domain is in reset; run rfdc_status / clock_check" }
+        if {($st & 2) == 0} { return }
+        if {[clock milliseconds] >= $deadline} {
+            error "APPLY still pending; restore the DAC clock before retrying (do not toggle APPLY again)"
+        }
+        after 10
     }
-    error "APPLY did not complete: is the DAC clock running? (see rfdc_status, STATUS bit0)"
+}
+proc chirp_apply {} {
+    chirp_wait_idle
+    creg_wr APPLY 1
+    chirp_wait_idle
+}
+
+# Disable using the CURRENT packing/swap flags, then drain the sample pipeline.
+proc chirp_prepare {} {
+    rfdc_require_running
+    chirp_wait_idle
+    creg_wr CTRL [expr {[creg_rd CTRL] & ~1}]
+    chirp_apply
+    after 1
 }
 
 # ---- helpers -----------------------------------------------------------------------
 proc fword {f_hz} {    ;# signed 32-bit frequency word at the baseband rate
+    if {![string is double -strict $f_hz] || ![expr {abs($f_hz) < Inf}]} { error "frequency must be finite and numeric" }
     set w [expr {round(double($f_hz) / $::FS_BB * 4294967296.0)}]
     if {$w >= 2147483648 || $w < -2147483648} { error "frequency $f_hz outside +-FS_BB/2" }
     return [expr {$w & 0xFFFFFFFF}]
@@ -75,15 +96,29 @@ proc ctrl_word {enable cw swap ilv} {
 
 # packing / swap options, kept between calls (set once during bring-up)
 set ::IQ_SWAP 0
-set ::PACK_ILV 0
-proc iq_options {swap ilv} { set ::IQ_SWAP $swap; set ::PACK_ILV $ilv; puts "IQ_SWAP=$swap PACK_ILV=$ilv" }
+set ::PACK_ILV 1   ;# PG269: even 16-bit words = I, odd words = Q
+proc iq_options {swap ilv} {
+    if {$swap ni {0 1} || $ilv ni {0 1}} { error "swap and ilv must be 0 or 1" }
+    if {!$ilv} { puts "WARNING: split packing is for RTL experiments; RFDC I/Q input requires ilv=1" }
+    set ::IQ_SWAP $swap; set ::PACK_ILV $ilv
+    puts "IQ_SWAP=$swap PACK_ILV=$ilv"
+}
+proc amplitude_word {amp} {
+    if {![string is double -strict $amp] || !($amp >= 0 && $amp <= 1)} {
+        error "amplitude must be between 0 and 1"
+    }
+    return [expr {round($amp * 32767)}]
+}
 
 # ---- user commands -----------------------------------------------------------------
 # CW tone at (NCO + f_off). amp: 0..1 of full scale
 proc cw {f_off {amp 0.5}} {
-    creg_wr FSTART [fword $f_off]
+    set f0 [fword $f_off]
+    set a [amplitude_word $amp]
+    chirp_prepare
+    creg_wr FSTART $f0
     creg_wr KRATE  0
-    creg_wr AMP    [expr {min(0x7FFF, int(round($amp * 32767)))}]
+    creg_wr AMP    $a
     creg_wr PHASE0 0
     creg_wr CTRL   [ctrl_word 1 1 $::IQ_SWAP $::PACK_ILV]
     chirp_apply
@@ -95,10 +130,18 @@ proc cw {f_off {amp 0.5}} {
 #   chirp -bw 400e6 -pw 2e-6 -pri 10e-6 ?-offset 0? ?-amp 0.5? ?-phase_deg 0?
 proc chirp {args} {
     array set o {-bw 100e6 -pw 1e-6 -pri 10e-6 -offset 0 -amp 0.5 -phase_deg 0}
-    array set o $args
-    set pw_clk  [expr {int(round($o(-pw)  * $::FCLK))}]
-    set pri_clk [expr {int(round($o(-pri) * $::FCLK))}]
-    if {$pw_clk < 1 || $pri_clk < $pw_clk} { error "need 1 <= PW <= PRI (in clocks: PW=$pw_clk PRI=$pri_clk)" }
+    if {[llength $args] % 2} { error "chirp needs option/value pairs" }
+    foreach {key val} $args {
+        if {![info exists o($key)]} { error "Unknown chirp option: $key" }
+        if {![string is double -strict $val] || ![expr {abs($val) < Inf}]} {
+            error "$key must be finite and numeric"
+        }
+        set o($key) $val
+    }
+    set a [amplitude_word $o(-amp)]
+    set pw_clk  [expr {wide(round($o(-pw)  * $::FCLK))}]
+    set pri_clk [expr {wide(round($o(-pri) * $::FCLK))}]
+    if {$pw_clk < 1 || $pri_clk < $pw_clk || $pri_clk > 0xFFFFFFFF} { error "need 1 <= PW <= PRI (in clocks: PW=$pw_clk PRI=$pri_clk)" }
     set ns     [expr {$pw_clk * $::LANES}]
     set f0     [expr {$o(-offset) - $o(-bw) / 2.0}]
     set f1     [expr {$o(-offset) + $o(-bw) / 2.0}]
@@ -108,12 +151,16 @@ proc chirp {args} {
     # frequency-word increase per sample, Q24.8
     set k [expr {round(double($o(-bw)) / $::FS_BB * 4294967296.0 / $ns * 256.0)}]
     if {$k >= 2147483648 || $k < -2147483648} { error "slope too steep for KRATE (Q24.8)" }
-    creg_wr FSTART [fword $f0]
+    set fw [fword $f0]
+    fword $f1
+    set phase [expr {wide(round(fmod($o(-phase_deg), 360.0) / 360.0 * 4294967296.0)) & 0xFFFFFFFF}]
+    chirp_prepare
+    creg_wr FSTART $fw
     creg_wr KRATE  [expr {$k & 0xFFFFFFFF}]
     creg_wr PW     $pw_clk
     creg_wr PRI    $pri_clk
-    creg_wr AMP    [expr {min(0x7FFF, int(round($o(-amp) * 32767)))}]
-    creg_wr PHASE0 [expr {int(round($o(-phase_deg) / 360.0 * 4294967296.0)) & 0xFFFFFFFF}]
+    creg_wr AMP    $a
+    creg_wr PHASE0 $phase
     creg_wr CTRL   [ctrl_word 1 0 $::IQ_SWAP $::PACK_ILV]
     chirp_apply
     set slope [expr {($k / 256.0) * $::FS_BB * $::FS_BB / 4294967296.0}]
@@ -123,8 +170,7 @@ proc chirp {args} {
 }
 
 proc gen_off {} {
-    creg_wr CTRL [ctrl_word 0 0 $::IQ_SWAP $::PACK_ILV]
-    chirp_apply
+    chirp_prepare
     puts "output off"
 }
 
@@ -146,7 +192,33 @@ proc rfdc_status {} {
         [expr {228 + $::DAC_TILE}] $state [expr {($st >> 2) & 1}] [expr {($st >> 3) & 1}]]
     set cs [creg_rd STATUS]
     puts [format "chirp_gen: DAC clock domain out of reset %d, apply pending %d" [expr {$cs & 1}] [expr {($cs >> 1) & 1}]]
+    if {$state != 15} {
+        puts "Check CLK104 LMK DCLKout6 = 245.76 MHz to tile 228; use rfdc_restart after programming the clock."
+    }
     return $state
+}
+
+proc rfdc_require_running {} {
+    set b [rfdc_tile_ctrl]
+    set state [expr {[rd32 [expr {$b + 0x0C}]] & 15}]
+    set st [rd32 [expr {$b + 0x228}]]
+    if {$state != 15 || ($st & 12) != 12} {
+        error "DAC tile 228 is not ready (state=$state, status=[format 0x%08X $st]); run rfdc_status"
+    }
+}
+
+# STATUS[0] alone is not evidence of a running clock: observe heartbeat edges.
+proc clock_check {{timeout_ms 1000}} {
+    set initial [expr {[creg_rd STATUS] & 4}]
+    set deadline [expr {[clock milliseconds] + $timeout_ms}]
+    while {[clock milliseconds] < $deadline} {
+        after 10
+        if {([creg_rd STATUS] & 4) != $initial} {
+            puts "DAC fabric heartbeat is changing"
+            return 1
+        }
+    }
+    error "No DAC fabric heartbeat; check CLK104, RFDC PLL and clk_wiz_dac lock"
 }
 
 # re-run the tile power-on sequence (use after the clock was programmed late)
@@ -154,13 +226,24 @@ proc rfdc_restart {} {
     set b [rfdc_tile_ctrl]
     wr32 [expr {$b + 0x08}] 0x010F      ;# start state 1, end state 15
     wr32 [expr {$b + 0x04}] 0x1         ;# restart
-    after 200
+    set deadline [expr {[clock milliseconds] + 3000}]
+    while {[clock milliseconds] < $deadline} {
+        after 20
+        if {![catch {rfdc_require_running}]} {
+            rfdc_status
+            clock_check
+            return
+        }
+    }
     rfdc_status
+    error "DAC tile 228 restart timed out"
 }
 
 # Set the fine-mixer NCO frequency (Hz) and apply it immediately.
 proc nco_set {f_hz} {
-    set f [expr {double($f_hz)}]
+    if {![string is double -strict $f_hz] || ![expr {abs($f_hz) < Inf}]} { error "NCO frequency must be finite" }
+    rfdc_require_running
+    set f [expr {fmod(double($f_hz), $::FS_DAC)}]
     while {$f >  $::FS_DAC / 2.0} { set f [expr {$f - $::FS_DAC}] }
     while {$f < -$::FS_DAC / 2.0} { set f [expr {$f + $::FS_DAC}] }
     set w [expr {wide(round($f / $::FS_DAC * pow(2, 48))) & 0xFFFFFFFFFFFF}]

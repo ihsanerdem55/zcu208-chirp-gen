@@ -278,13 +278,19 @@ module tb_chirp_gen;
         repeat (200) @(posedge dclk);
         if (gated != g0) begin $display("FAIL T5: trig_out active while disabled"); errors++; end
 
+        // T6: actual RFDC hardware format: interleaved I0,Q0,...,I3,Q3.
+        $display("T6: pulsed LFM in RFDC interleaved format");
+        setup_gen(1, 0, 0, 1, -200.0e6, krate_for(400.0e6, 368), 368, 1843, 0.5, 0.0);
+        capture("out/chirp_interleaved.txt", 4096);
+        gen_off();
+
         // summary
         $display("--------------------------------------------------------------");
         $display("Scoreboard: %0d samples checked (%0d inside pulses), %0d mismatches",
                  checked, gated, mism);
         if (mism != 0 || gated < 10000) errors++;
         if (errors == 0) $display("*** TEST PASSED ***");
-        else             $display("*** TEST FAILED (%0d errors) ***", errors);
+        else             $fatal(1, "*** TEST FAILED (%0d errors) ***", errors);
         $display("--------------------------------------------------------------");
         $finish;
     end
@@ -292,7 +298,6 @@ module tb_chirp_gen;
     // safety net
     initial begin
         #(64'd20_000_000_000);   // 20 ms
-        $display("*** TEST FAILED: timeout ***");
-        $finish;
+        $fatal(1, "*** TEST FAILED: timeout ***");
     end
 endmodule

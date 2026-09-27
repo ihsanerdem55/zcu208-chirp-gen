@@ -87,7 +87,7 @@ module chirp_axil_regs #(
             w_have       <= 1'b0;
             s_axi_bvalid <= 1'b0;
             req_tgl      <= 1'b0;
-            r_ctrl       <= '0;
+            r_ctrl       <= 32'h0000_0008;       // RFDC interleaved I/Q
             r_fstart     <= '0;
             r_krate      <= '0;
             r_pw         <= 32'd100;
@@ -165,7 +165,7 @@ module chirp_axil_regs #(
             enable      <= 1'b0;
             cw_mode     <= 1'b0;
             iq_swap     <= 1'b0;
-            pack_ilv    <= 1'b0;
+            pack_ilv    <= 1'b1;
             f_start     <= '0;
             k_rate      <= '0;
             pw          <= 32'd100;

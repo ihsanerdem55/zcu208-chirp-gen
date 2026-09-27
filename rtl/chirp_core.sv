@@ -41,7 +41,7 @@ module chirp_core #(
     // AXI4-Stream to RF-DAC
     output logic [LANES*32-1:0]      m_axis_tdata,
     output logic                     m_axis_tvalid,
-    input  logic                     m_axis_tready, // RF-DAC is always ready; ignored
+    input  logic                     m_axis_tready, // RFDC startup indicator; see PG269 (TVALID does not gate DAC data)
     // pulse gate aligned with the samples at m_axis_tdata
     output logic                     trig_out
 );

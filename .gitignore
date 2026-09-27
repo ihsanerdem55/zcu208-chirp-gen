@@ -6,3 +6,7 @@ vivado/
 .Xil/
 xsim.dir/
 __pycache__/
+sim/out/
+sim/*.vvp
+sim/sincos_qw.mem
+out/
