@@ -40,15 +40,17 @@ def read_capture(path, columns=None, interleaved=True):
         raise ValueError("Empty capture")
     headers = [c.strip() for c in rows[0]]
     indices = {}
-    for key, (signal, port) in {
-        "data": ("m_axis_tdata", 0), "gate": ("trig_out", 1),
-        "valid": ("m_axis_tvalid", 2), "ready": ("m_axis_tready", 3),
+    # The block design probes the chirp_gen_0/mon_* copies of the stream.
+    for key, (signals, port) in {
+        "data": (("m_axis_tdata", "mon_data"), 0), "gate": (("trig_out",), 1),
+        "valid": (("m_axis_tvalid", "mon_valid"), 2), "ready": (("m_axis_tready", "mon_ready"), 3),
     }.items():
         if columns.get(key):
             matches = [i for i, h in enumerate(headers) if h == columns[key]]
         else:
             matches = [i for i, h in enumerate(headers)
-                       if signal in h.lower() or re.search(rf"(?:^|[/_.])probe{port}(?:$|\[)", h.lower())]
+                       if any(s in h.lower() for s in signals)
+                       or re.search(rf"(?:^|[/_.])probe{port}(?:$|\[)", h.lower())]
         if len(matches) != 1:
             raise ValueError(f"Cannot uniquely find {key} column; use --{key}-column. Columns: {headers}")
         indices[key] = matches[0]

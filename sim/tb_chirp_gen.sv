@@ -33,8 +33,8 @@ module tb_chirp_gen;
     logic awready, wready, bvalid, arready, rvalid;
     logic [31:0] wdata = 0, rdata;
     logic [1:0]  bresp, rresp;
-    logic [LANES*32-1:0] tdata;
-    logic tvalid, trig;
+    logic [LANES*32-1:0] tdata, mon_data;
+    logic tvalid, trig, mon_valid, mon_ready;
 
     chirp_gen_wrapper #(.LANES(LANES)) dut (
         .s_axi_aclk(aclk), .s_axi_aresetn(aresetn),
@@ -46,8 +46,16 @@ module tb_chirp_gen;
         .dac_mmcm_locked(1'b1), .dac_mmcm_reset(), .dac_domain_reset(),
         .dac_clk(dclk), .dac_rst_n(drst_n),
         .m_axis_tdata(tdata), .m_axis_tvalid(tvalid), .m_axis_tready(1'b1),
-        .trig_out(trig)
+        .trig_out(trig),
+        .mon_data(mon_data), .mon_valid(mon_valid), .mon_ready(mon_ready)
     );
+
+    // The ILA monitor ports must mirror the RFDC stream exactly.
+    int mon_errors = 0;
+    always @(posedge dclk) begin
+        #1;
+        if (mon_data !== tdata || mon_valid !== tvalid || mon_ready !== 1'b1) mon_errors++;
+    end
 
     // --------------------------------------------------------- AXI-Lite BFM
     task automatic axi_write(input logic [15:0] a, input logic [31:0] d);
@@ -294,6 +302,9 @@ module tb_chirp_gen;
         $display("Scoreboard: %0d samples checked (%0d inside pulses), %0d mismatches",
                  checked, gated, mism);
         if (mism != 0 || gated < 10000) errors++;
+        if (mon_errors != 0) begin
+            $display("FAIL: ILA monitor ports differ from m_axis on %0d clocks", mon_errors); errors++;
+        end
         if (errors == 0) $display("*** TEST PASSED ***");
         else             $fatal(1, "*** TEST FAILED (%0d errors) ***", errors);
         $display("--------------------------------------------------------------");

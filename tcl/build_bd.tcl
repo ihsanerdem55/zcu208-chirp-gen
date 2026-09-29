@@ -38,6 +38,8 @@ add_files -fileset constrs_1 -norecurse $repo_dir/constraints/chirp_timing.xdc
 set_property USED_IN_SYNTHESIS false [get_files chirp_timing.xdc]
 set_property PROCESSING_ORDER LATE [get_files chirp_timing.xdc]
 if {$ADD_ILA} {
+    # Hook scripts belong to the utils_1 fileset so project archives include them.
+    add_files -fileset utils_1 -norecurse $repo_dir/tcl/debug_hub.tcl
     set_property STEPS.OPT_DESIGN.TCL.PRE $repo_dir/tcl/debug_hub.tcl [get_runs impl_1]
 }
 update_compile_order -fileset sources_1
@@ -172,22 +174,26 @@ connect_bd_net [get_bd_pins chirp_gen_0/trig_out] [get_bd_ports trig_out]
 # Native ILA avoids System ILA monitor-slot type/version mismatches.
 # Full stream + handshake + pulse marker and eight signed 16-bit lane probes.
 # ILA samples in the DAC domain; debug_hub.tcl keeps the hub on independent AXI.
+# The IP-integrator ILA defaults to AXI-monitor mode, which ignores the native
+# probe widths; select native mode explicitly. Probes use chirp_gen_0/mon_*:
+# a net on an m_axis pin would detach that pin from the RFDC stream.
+set ila_widths [list 128 1 1 1 16 16 16 16 16 16 16 16]
 if {$ADD_ILA} {
     set ila [create_bd_cell -type ip -vlnv xilinx.com:ip:ila ila_dac]
-    set cfg [list CONFIG.C_NUM_OF_PROBES 12 CONFIG.C_DATA_DEPTH 4096 \
-        CONFIG.C_PROBE0_WIDTH 128 CONFIG.C_PROBE1_WIDTH 1 \
-        CONFIG.C_PROBE2_WIDTH 1 CONFIG.C_PROBE3_WIDTH 1]
-    for {set n 4} {$n < 12} {incr n} { lappend cfg CONFIG.C_PROBE${n}_WIDTH 16 }
+    set cfg [list CONFIG.C_ENABLE_ILA_AXI_MON false CONFIG.C_MONITOR_TYPE Native \
+        CONFIG.C_NUM_OF_PROBES [llength $ila_widths] CONFIG.C_DATA_DEPTH 4096]
+    set n 0
+    foreach w $ila_widths { lappend cfg CONFIG.C_PROBE${n}_WIDTH $w; incr n }
     set_property -dict $cfg $ila
     connect_bd_net $dac_clk [get_bd_pins ila_dac/clk]
-    foreach {probe signal} {0 m_axis_tdata 1 trig_out 2 m_axis_tvalid 3 m_axis_tready} {
+    foreach {probe signal} {0 mon_data 1 trig_out 2 mon_valid 3 mon_ready} {
         connect_bd_net [get_bd_pins chirp_gen_0/$signal] [get_bd_pins ila_dac/probe$probe]
     }
     for {set n 0} {$n < 8} {incr n} {
         set slice [create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice iq_slice_$n]
         set_property -dict [list CONFIG.DIN_WIDTH 128 CONFIG.DIN_FROM [expr {16*$n+15}] \
             CONFIG.DIN_TO [expr {16*$n}] CONFIG.DOUT_WIDTH 16] $slice
-        connect_bd_net [get_bd_pins chirp_gen_0/m_axis_tdata] [get_bd_pins iq_slice_$n/Din]
+        connect_bd_net [get_bd_pins chirp_gen_0/mon_data] [get_bd_pins iq_slice_$n/Din]
         connect_bd_net [get_bd_pins iq_slice_$n/Dout] [get_bd_pins ila_dac/probe[expr {$n+4}]]
     }
 }
@@ -213,6 +219,20 @@ set nb [get_property CONFIG.TDATA_NUM_BYTES $stream]
 if {$nb != 16} { error "RFDC stream must be 128 bits, got $nb bytes" }
 set fabric [get_property CONFIG.DAC0_Fabric_Freq $rfdc]
 if {abs($fabric - 184.32) > 0.001} { error "RFDC requires $fabric MHz, expected 184.32 MHz" }
+# The generator must drive the RFDC through the interface connection.
+set snet [get_bd_intf_nets -quiet -of_objects $stream]
+if {[llength $snet] != 1 ||
+    [lsearch -exact [get_bd_intf_pins -quiet -of_objects $snet] /chirp_gen_0/m_axis] < 0} {
+    error "rfdc/s00_axis is not connected to chirp_gen_0/m_axis as an interface"
+}
+if {$ADD_ILA} {
+    set n 0
+    foreach w $ila_widths {
+        set got [get_property CONFIG.C_PROBE${n}_WIDTH $ila]
+        if {$got != $w} { error "ila_dac probe$n is $got bits, expected $w" }
+        incr n
+    }
+}
 save_bd_design
 
 # ------------------------------------------------------------ HDL wrapper

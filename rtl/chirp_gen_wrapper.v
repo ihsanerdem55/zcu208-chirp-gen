@@ -50,8 +50,22 @@ module chirp_gen_wrapper #(
     output wire [LANES*32-1:0]   m_axis_tdata,
     output wire                  m_axis_tvalid,
     input  wire                  m_axis_tready,
-    output wire                  trig_out
+    output wire                  trig_out,
+
+    // ILA monitor copies of the stream. In a block design, wiring a net to a pin
+    // of the connected m_axis interface removes that pin from the interface, so
+    // the ILA taps these plain ports instead.
+    (* X_INTERFACE_IGNORE = "true" *)
+    output wire [LANES*32-1:0]   mon_data,
+    (* X_INTERFACE_IGNORE = "true" *)
+    output wire                  mon_valid,
+    (* X_INTERFACE_IGNORE = "true" *)
+    output wire                  mon_ready
 );
+    assign mon_data  = m_axis_tdata;
+    assign mon_valid = m_axis_tvalid;
+    assign mon_ready = m_axis_tready;
+
     chirp_gen_top #(
         .LANES    (LANES),
         .ADDR_W   (ADDR_W),

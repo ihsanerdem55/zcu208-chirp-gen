@@ -48,6 +48,16 @@ class CaptureTests(unittest.TestCase):
         rows[0][1] = "chirp_gen_0_m_axis_TDATA[127:0]"
         self.assertEqual(self.capture(rows)[0], lanes * 2)
 
+    def test_block_design_monitor_nets(self):
+        lanes, rows = self.fixture()
+        rows[0][1:] = ["chirp_bd_i/chirp_gen_0_mon_data[127:0]", "chirp_bd_i/chirp_gen_0_trig_out",
+                       "chirp_bd_i/chirp_gen_0_mon_valid", "chirp_bd_i/chirp_gen_0_mon_ready"]
+        rows[0].append("chirp_bd_i/iq_slice_0_Dout[15:0]")
+        rows[1].append("HEX")
+        for row in rows[2:]:
+            row.append("0001")
+        self.assertEqual(self.capture(rows)[0], lanes * 2)
+
     def test_unready_is_not_silently_removed(self):
         _, rows = self.fixture()
         rows[-1][-1] = "0"

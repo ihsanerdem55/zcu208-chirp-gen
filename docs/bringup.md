@@ -54,7 +54,12 @@ source tcl/build_bd.tcl
 ```
 
 The script creates `vivado/zcu208_chirp`, builds the block design and stops
-with an error if anything required is missing. Then open the **rfdc** block
+with an error if anything required is missing. That includes a broken
+chirp→RFDC stream connection or wrong ILA probe widths. The Messages window
+must not show [BD 41-1271] (pin detached from an interface), [BD 41-759]
+(inputs tied to 0) or [BD 41-2383] (width mismatch). [BD 41-926] about
+`TDATA_NUM_BYTES = 16` on `chirp_gen_0/m_axis` can appear and is harmless:
+both ends agree on 16 bytes. Then open the **rfdc** block
 once, confirm these settings, and close it with **Cancel** so nothing changes:
 
 | Setting | Expected |
