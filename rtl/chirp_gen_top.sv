@@ -25,6 +25,9 @@ module chirp_gen_top #(
     output logic [1:0]              s_axi_rresp,
     output logic                    s_axi_rvalid,
     input  logic                    s_axi_rready,
+    input  logic                    dac_mmcm_locked,
+    output logic                    dac_mmcm_reset,
+    output logic                    dac_domain_reset,
 
     input  logic                    dac_clk,
     input  logic                    dac_rst_n,
@@ -45,6 +48,7 @@ module chirp_gen_top #(
         .s_axi_bresp, .s_axi_bvalid, .s_axi_bready,
         .s_axi_araddr, .s_axi_arvalid, .s_axi_arready,
         .s_axi_rdata, .s_axi_rresp, .s_axi_rvalid, .s_axi_rready,
+        .dac_mmcm_locked, .dac_mmcm_reset, .dac_domain_reset,
         .dac_clk, .dac_rst_n,
         .enable, .cw_mode, .iq_swap, .pack_ilv,
         .f_start, .k_rate, .pw, .pri, .amp, .phase0,

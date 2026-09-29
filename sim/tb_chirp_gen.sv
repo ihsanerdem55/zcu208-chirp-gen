@@ -43,6 +43,7 @@ module tb_chirp_gen;
         .s_axi_bresp(bresp), .s_axi_bvalid(bvalid), .s_axi_bready(bready),
         .s_axi_araddr(araddr), .s_axi_arvalid(arvalid), .s_axi_arready(arready),
         .s_axi_rdata(rdata), .s_axi_rresp(rresp), .s_axi_rvalid(rvalid), .s_axi_rready(rready),
+        .dac_mmcm_locked(1'b1), .dac_mmcm_reset(), .dac_domain_reset(),
         .dac_clk(dclk), .dac_rst_n(drst_n),
         .m_axis_tdata(tdata), .m_axis_tvalid(tvalid), .m_axis_tready(1'b1),
         .trig_out(trig)
@@ -50,20 +51,22 @@ module tb_chirp_gen;
 
     // --------------------------------------------------------- AXI-Lite BFM
     task automatic axi_write(input logic [15:0] a, input logic [31:0] d);
-        @(posedge aclk);
-        awaddr <= a; wdata <= d; awvalid <= 1; wvalid <= 1;
+        @(negedge aclk);
+        awaddr = a; wdata = d; awvalid = 1; wvalid = 1;
         fork
-            begin do @(posedge aclk); while (!awready); awvalid <= 0; end
-            begin do @(posedge aclk); while (!wready);  wvalid  <= 0; end
+            begin do @(posedge aclk); while (!awready); @(negedge aclk); awvalid = 0; end
+            begin do @(posedge aclk); while (!wready);  @(negedge aclk); wvalid = 0; end
         join
         do @(posedge aclk); while (!bvalid);
+        if (bresp != 0) $fatal(1, "AXI write rejected at %h", a);
     endtask
 
     task automatic axi_read(input logic [15:0] a, output logic [31:0] d);
-        @(posedge aclk);
-        araddr <= a; arvalid <= 1;
+        @(negedge aclk);
+        araddr = a; arvalid = 1;
         do @(posedge aclk); while (!arready);
-        arvalid <= 0;
+        @(negedge aclk);
+        arvalid = 0;
         do @(posedge aclk); while (!rvalid);
         d = rdata;
     endtask
@@ -232,9 +235,9 @@ module tb_chirp_gen;
 
     initial begin
         repeat (10) @(posedge aclk);
-        aresetn = 1;
+        @(negedge aclk); aresetn = 1;
         repeat (5) @(posedge dclk);
-        drst_n = 1;
+        @(negedge dclk); drst_n = 1;
         repeat (5) @(posedge aclk);
 
         // T0: register access
@@ -242,8 +245,10 @@ module tb_chirp_gen;
         if (v !== 32'h43485250) begin $display("FAIL T0: ID = %h", v); errors++; end
         else $display("PASS T0: ID register = %h (CHRP)", v);
         axi_read(16'h24, v);
-        if (v[0] !== 1'b1) begin $display("FAIL T0: STATUS ready bit = %b", v[0]); errors++; end
-        else $display("PASS T0: DAC clock domain reported ready");
+        if (v[0] !== 1'b1 || v[3] !== 1'b1) begin
+            $display("FAIL T0: STATUS ready/MMCM-locked bits = %b/%b", v[0], v[3]); errors++;
+        end
+        else $display("PASS T0: DAC clock domain reported ready, MMCM locked");
 
         // T1: CW +10 MHz, full scale
         $display("T1: CW +10 MHz, full scale, split packing");
@@ -278,13 +283,19 @@ module tb_chirp_gen;
         repeat (200) @(posedge dclk);
         if (gated != g0) begin $display("FAIL T5: trig_out active while disabled"); errors++; end
 
+        // T6: actual RFDC hardware format: interleaved I0,Q0,...,I3,Q3.
+        $display("T6: pulsed LFM in RFDC interleaved format");
+        setup_gen(1, 0, 0, 1, -200.0e6, krate_for(400.0e6, 368), 368, 1843, 0.5, 0.0);
+        capture("out/chirp_interleaved.txt", 4096);
+        gen_off();
+
         // summary
         $display("--------------------------------------------------------------");
         $display("Scoreboard: %0d samples checked (%0d inside pulses), %0d mismatches",
                  checked, gated, mism);
         if (mism != 0 || gated < 10000) errors++;
         if (errors == 0) $display("*** TEST PASSED ***");
-        else             $display("*** TEST FAILED (%0d errors) ***", errors);
+        else             $fatal(1, "*** TEST FAILED (%0d errors) ***", errors);
         $display("--------------------------------------------------------------");
         $finish;
     end
@@ -292,7 +303,7 @@ module tb_chirp_gen;
     // safety net
     initial begin
         #(64'd20_000_000_000);   // 20 ms
-        $display("*** TEST FAILED: timeout ***");
-        $finish;
+        $fatal(1, "*** TEST FAILED: timeout ***");
     end
 endmodule
+

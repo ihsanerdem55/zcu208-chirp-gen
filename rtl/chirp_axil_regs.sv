@@ -10,15 +10,26 @@
 //   0x14 PRI     RW  pulse repetition interval, fabric clocks (>= 1)
 //   0x18 AMP     RW  [15:0] amplitude, Q1.15 (0x7FFF = full scale)
 //   0x1C PHASE0  RW  start phase (2*pi = 2^32)
-//   0x20 APPLY   WO  write any value: copy all RW registers into the DAC clock domain
-//   0x24 STATUS  RO  [0] DAC-domain reset released  [1] apply pending  [2] DAC-clock heartbeat
+//   0x20 APPLY   WO  write with any byte strobe: copy all RW registers into the DAC clock domain
+//   0x24 STATUS  RO  [0] DAC-domain handshake ready  [1] apply pending  [2] DAC-clock heartbeat
+//                    [3] DAC fabric-clock MMCM locked
 //
 // Nothing written to 0x04..0x1C reaches the generator until APPLY is written.
 // CDC: toggle handshake. Software must wait for STATUS[1] = 0 before changing
-// registers again (the Tcl helpers do this).
+// registers again (the Tcl helpers do this). Hardware rejects writes while busy.
+// DAC reset aborts a request and leaves output disabled; explicitly APPLY again
+// after STATUS[0] returns. The old toggle is baselined, never replayed.
+//
+// DAC MMCM supervision (AXI clock): the MMCM input rfdc/clk_dac0 is absent at
+// configuration and stops during every tile restart. An MMCM must be reset after
+// LOCKED falls, so dac_mmcm_reset is pulsed every 2^WD_BITS clocks while unlocked.
+// dac_domain_reset holds the DAC reset controller until lock has been stable for
+// 2^LOCK_BITS clocks, so a waveform frozen by a clock loss is cleared, not resumed.
 // -----------------------------------------------------------------------------
 module chirp_axil_regs #(
-    parameter int ADDR_W = 16
+    parameter int ADDR_W    = 16,
+    parameter int WD_BITS   = 18,          // 2.6 ms at 100 MHz, > 100 us MMCM lock time
+    parameter int LOCK_BITS = 7            // 1.28 us of stable lock at 100 MHz
 ) (
     // AXI4-Lite slave, s_axi_aclk domain
     input  logic               s_axi_aclk,
@@ -40,6 +51,10 @@ module chirp_axil_regs #(
     output logic [1:0]         s_axi_rresp,
     output logic               s_axi_rvalid,
     input  logic               s_axi_rready,
+    // DAC fabric-clock MMCM supervision, s_axi_aclk domain
+    input  logic               dac_mmcm_locked,   // asynchronous clk_wiz_dac/locked
+    output logic               dac_mmcm_reset,    // clk_wiz_dac/reset, active high
+    output logic               dac_domain_reset,  // DAC reset controller aux input, active high
     // parameter outputs, dac_clk domain
     input  logic               dac_clk,
     input  logic               dac_rst_n,
@@ -69,7 +84,6 @@ module chirp_axil_regs #(
 
     assign s_axi_awready = !aw_have && !s_axi_bvalid;
     assign s_axi_wready  = !w_have  && !s_axi_bvalid;
-    assign s_axi_bresp   = 2'b00;
     assign s_axi_rresp   = 2'b00;
 
     function automatic logic [31:0] merge(input logic [31:0] old_v,
@@ -86,8 +100,9 @@ module chirp_axil_regs #(
             aw_have      <= 1'b0;
             w_have       <= 1'b0;
             s_axi_bvalid <= 1'b0;
+            s_axi_bresp  <= 2'b00;
             req_tgl      <= 1'b0;
-            r_ctrl       <= '0;
+            r_ctrl       <= 32'h0000_0008;       // RFDC interleaved I/Q
             r_fstart     <= '0;
             r_krate      <= '0;
             r_pw         <= 32'd100;
@@ -105,17 +120,25 @@ module chirp_axil_regs #(
                 w_have  <= 1'b1;
             end
             if (aw_have && w_have) begin
-                case (awaddr_q[5:2])
-                    4'h1: r_ctrl   <= merge(r_ctrl,   wdata_q, wstrb_q);
-                    4'h2: r_fstart <= merge(r_fstart, wdata_q, wstrb_q);
-                    4'h3: r_krate  <= merge(r_krate,  wdata_q, wstrb_q);
-                    4'h4: r_pw     <= merge(r_pw,     wdata_q, wstrb_q);
-                    4'h5: r_pri    <= merge(r_pri,    wdata_q, wstrb_q);
-                    4'h6: r_amp    <= merge(r_amp,    wdata_q, wstrb_q);
-                    4'h7: r_phase0 <= merge(r_phase0, wdata_q, wstrb_q);
-                    4'h8: req_tgl  <= ~req_tgl;         // APPLY
-                    default: ;                          // read-only / unused
-                endcase
+                s_axi_bresp <= 2'b00;
+                // Keep the bundled parameters stable until the DAC acknowledges.
+                // A zero-strobe write is a no-op, including at APPLY.
+                if (|wstrb_q) begin
+                    if ((awaddr_q[5:2] >= 1 && awaddr_q[5:2] <= 8) &&
+                        (status[1] || ((awaddr_q[5:2] == 8) && !status[0]))) begin
+                        s_axi_bresp <= 2'b10; // SLVERR: pending or DAC not ready
+                    end else case (awaddr_q[5:2])
+                        4'h1: r_ctrl   <= merge(r_ctrl,   wdata_q, wstrb_q);
+                        4'h2: r_fstart <= merge(r_fstart, wdata_q, wstrb_q);
+                        4'h3: r_krate  <= merge(r_krate,  wdata_q, wstrb_q);
+                        4'h4: r_pw     <= merge(r_pw,     wdata_q, wstrb_q);
+                        4'h5: r_pri    <= merge(r_pri,    wdata_q, wstrb_q);
+                        4'h6: r_amp    <= merge(r_amp,    wdata_q, wstrb_q);
+                        4'h7: r_phase0 <= merge(r_phase0, wdata_q, wstrb_q);
+                        4'h8: req_tgl  <= ~req_tgl;         // APPLY
+                        default: ;                          // read-only / unused
+                    endcase
+                end
                 aw_have      <= 1'b0;
                 w_have       <= 1'b0;
                 s_axi_bvalid <= 1'b1;
@@ -154,10 +177,14 @@ module chirp_axil_regs #(
     // ============================================ CDC: AXI -> DAC (toggle)
     (* ASYNC_REG = "TRUE" *) logic [1:0] req_sync;
     logic req_seen;
+    logic [2:0] startup;
+    logic dac_online;
     logic ack_tgl;                                 // dac domain copy of req_tgl
 
-    always_ff @(posedge dac_clk) begin
+    always_ff @(posedge dac_clk or negedge dac_rst_n) begin
         if (!dac_rst_n) begin
+            startup     <= '0;
+            dac_online  <= 1'b0;
             req_sync    <= '0;
             req_seen    <= 1'b0;
             ack_tgl     <= 1'b0;
@@ -165,7 +192,7 @@ module chirp_axil_regs #(
             enable      <= 1'b0;
             cw_mode     <= 1'b0;
             iq_swap     <= 1'b0;
-            pack_ilv    <= 1'b0;
+            pack_ilv    <= 1'b1;
             f_start     <= '0;
             k_rate      <= '0;
             pw          <= 32'd100;
@@ -176,7 +203,13 @@ module chirp_axil_regs #(
             req_sync    <= {req_sync[0], req_tgl};
             req_seen    <= req_sync[1];
             params_load <= 1'b0;
-            if (req_sync[1] != req_seen) begin
+            startup <= {startup[1:0], 1'b1};
+            if (!dac_online) begin
+                // Synchronize and consume the pre-reset toggle without loading
+                // its parameters. An odd old request must not re-enable RF.
+                ack_tgl <= req_sync[1];
+                if (&startup) dac_online <= 1'b1;
+            end else if (req_sync[1] != req_seen) begin
                 // AXI-side registers are quasi-static here (software waits on STATUS[1])
                 enable      <= r_ctrl[0];
                 cw_mode     <= r_ctrl[1];
@@ -198,11 +231,43 @@ module chirp_axil_regs #(
     logic [23:0] hb_cnt = '0;
     always_ff @(posedge dac_clk) hb_cnt <= hb_cnt + 1'b1;   // heartbeat, ~11 Hz toggle
 
-    (* ASYNC_REG = "TRUE" *) logic [1:0] ack_sync = '0, rdy_sync = '0, hb_sync = '0;
+    (* ASYNC_REG = "TRUE" *) logic [1:0] ack_sync = '0;
+    (* ASYNC_REG = "TRUE" *) logic [1:0] rdy_sync = '0;
+    (* ASYNC_REG = "TRUE" *) logic [1:0] hb_sync  = '0;
     always_ff @(posedge s_axi_aclk) begin
         ack_sync <= {ack_sync[0], ack_tgl};
-        rdy_sync <= {rdy_sync[0], dac_rst_n};
+        rdy_sync <= {rdy_sync[0], dac_online};
         hb_sync  <= {hb_sync[0],  hb_cnt[23]};
     end
-    assign status = {29'd0, hb_sync[1], (req_tgl != ack_sync[1]), rdy_sync[1]};
+
+    // ================================= DAC MMCM supervision (AXI clock domain)
+    (* ASYNC_REG = "TRUE" *) logic [1:0] lock_sync = '0;
+    logic [WD_BITS-1:0] unlock_cnt = '0;
+    logic [LOCK_BITS:0] lock_cnt   = '0;
+    logic               mmcm_rst_q = 1'b0;
+    logic               dom_rst_q  = 1'b1;
+    always_ff @(posedge s_axi_aclk) begin
+        lock_sync <= {lock_sync[0], dac_mmcm_locked};
+        if (!s_axi_aresetn) begin
+            unlock_cnt <= '0;
+            lock_cnt   <= '0;
+            mmcm_rst_q <= 1'b0;
+            dom_rst_q  <= 1'b1;                       // AXI reset also resets the DAC side
+        end else if (!lock_sync[1]) begin
+            unlock_cnt <= unlock_cnt + 1'b1;
+            lock_cnt   <= '0;
+            mmcm_rst_q <= &unlock_cnt[WD_BITS-1:4];   // last 16 clocks of each period
+            dom_rst_q  <= 1'b1;
+        end else begin
+            unlock_cnt <= '0;
+            mmcm_rst_q <= 1'b0;
+            if (!lock_cnt[LOCK_BITS]) lock_cnt <= lock_cnt + 1'b1;
+            dom_rst_q  <= !lock_cnt[LOCK_BITS];
+        end
+    end
+    assign dac_mmcm_reset   = mmcm_rst_q;
+    assign dac_domain_reset = dom_rst_q;
+
+    assign status = {28'd0, lock_sync[1], hb_sync[1], (req_tgl != ack_sync[1]), rdy_sync[1]};
 endmodule
+

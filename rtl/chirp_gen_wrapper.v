@@ -9,7 +9,7 @@ module chirp_gen_wrapper #(
     parameter ADDR_W = 16
 ) (
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)
-    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi, ASSOCIATED_RESET s_axi_aresetn, FREQ_HZ 100000000" *)
+    (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi, ASSOCIATED_RESET s_axi_aresetn:dac_mmcm_reset:dac_domain_reset, FREQ_HZ 100000000" *)
     input  wire                  s_axi_aclk,
     (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 s_axi_aresetn RST" *)
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
@@ -31,6 +31,15 @@ module chirp_gen_wrapper #(
     output wire [1:0]            s_axi_rresp,
     output wire                  s_axi_rvalid,
     input  wire                  s_axi_rready,
+
+    // DAC fabric-clock MMCM supervision (clk_wiz_dac locked/reset, DAC reset controller)
+    input  wire                  dac_mmcm_locked,
+    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 dac_mmcm_reset RST" *)
+    (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)
+    output wire                  dac_mmcm_reset,
+    (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 dac_domain_reset RST" *)
+    (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)
+    output wire                  dac_domain_reset,
 
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 dac_clk CLK" *)
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF m_axis, ASSOCIATED_RESET dac_rst_n, FREQ_HZ 184320000" *)
@@ -67,6 +76,9 @@ module chirp_gen_wrapper #(
         .s_axi_rresp   (s_axi_rresp),
         .s_axi_rvalid  (s_axi_rvalid),
         .s_axi_rready  (s_axi_rready),
+        .dac_mmcm_locked  (dac_mmcm_locked),
+        .dac_mmcm_reset   (dac_mmcm_reset),
+        .dac_domain_reset (dac_domain_reset),
         .dac_clk       (dac_clk),
         .dac_rst_n     (dac_rst_n),
         .m_axis_tdata  (m_axis_tdata),

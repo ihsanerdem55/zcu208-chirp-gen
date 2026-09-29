@@ -1,6 +1,6 @@
 # =============================================================================
 # zcu208_chirp.xdc
-# RF pins (DAC clock input, vout20, sysref) are dedicated and placed by the IP.
+# RF pins (DAC clock input, vout00, sysref) are dedicated and placed by the IP.
 # Pin numbers below come from the official ZCU208 board file
 # (XilinxBoardStore boards/Xilinx/zcu208/production/2.0/part0_pins.xml).
 # =============================================================================
@@ -27,13 +27,6 @@ set_property PACKAGE_PIN AR19     [get_ports trig_out]
 set_property IOSTANDARD  LVCMOS12 [get_ports trig_out]
 set_property DRIVE       8        [get_ports trig_out]
 set_property SLEW        FAST     [get_ports trig_out]
-
-# ---- Clock domains ---------------------------------------------------------------
-# The 100 MHz AXI clock and the 184.32 MHz DAC clock are unrelated. All crossings go
-# through the 2-flop handshake in chirp_axil_regs.sv, so time them as asynchronous.
-set_clock_groups -asynchronous \
-    -group [get_clocks -quiet clk_out1*clk_wiz_axi*] \
-    -group [get_clocks -quiet clk_out1*clk_wiz_dac*]
 
 # trig_out is a scope marker, not a timed interface
 set_false_path -to [get_ports trig_out]
