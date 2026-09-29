@@ -46,9 +46,11 @@ update_compile_order -fileset sources_1
 create_bd_design $bd_name
 
 # --- RF Data Converter -------------------------------------------------------
-# CLK104 connector supplies DAC tile 228, NOT tile 230 (UG1410).
-# Tile 230 has separate external SMA clock inputs. Use tile 228/channel 0
-# with the local PLL and a 245.76 MHz LMK reference, without tile forwarding.
+# Tile 228/channel 0 with its local PLL and a 245.76 MHz CLK104 reference,
+# without tile forwarding. This assumes the reference reaches the tile 228
+# clock input; AMD's ZCU208 examples also source DAC clocks from tile 230.
+# Confirm on the board: rfdc_status must report state 15 and PLL locked 1.
+# Units follow the IP: sampling rate in GSPS, NCO in GHz, clocks in MHz.
 set rfdc [create_bd_cell -type ip -vlnv xilinx.com:ip:usp_rf_data_converter rfdc]
 set rfdc_cfg [list \
     CONFIG.Axiclk_Freq             100.000 \
@@ -67,9 +69,9 @@ set rfdc_cfg [list \
     CONFIG.DAC_Data_Width00        8 \
     CONFIG.DAC_Mixer_Type00        2 \
     CONFIG.DAC_Mixer_Mode00        0 \
-    CONFIG.DAC_NCO_Freq00          1000.0 \
-    CONFIG.DAC_Nyquist00           1 \
+    CONFIG.DAC_NCO_Freq00          0.5 \
     CONFIG.DAC_Invsinc_Ctrl00       true]
+# Nyquist zone is left at the IP default (zone 1). NCO: 0.5 GHz until nco_set.
 # Set related parameters atomically; never silently build a different RF path.
 foreach tile {0 1 2 3} {
     lappend rfdc_cfg CONFIG.ADC${tile}_Enable 0

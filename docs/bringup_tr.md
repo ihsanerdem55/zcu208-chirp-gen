@@ -19,8 +19,10 @@ sorun giderme tablosu): [bringup.md](bringup.md).
   ILA örnekleme saati **184.32 MHz DAC fabric** saatidir. DAC saati yokken ILA
   örnek alamaz; bağımsız hub bağlantısı bu saati üretmez.
 - RFDC yapılandırması ve adres haritasındaki hatalar artık uyarıyla geçilmez.
-  NCO başlangıç ayarı MHz biriminde `1000.0` olarak yazılır; eski `1.0`,
-  yorumda belirtildiği gibi 1 GHz değildi.
+  **Düzeltme:** RFDC IP'de `DAC_NCO_Freq00` birimi **GHz**'dir (aralık −10..10).
+  Önceki `1000.0` değeri Vivado'da doğrulama hatası veriyordu. Başlangıç NCO'su
+  artık `0.5` (500 MHz); çalışma sırasında `nco_set` ile değiştirilir. Nyquist
+  bölgesi IP varsayılanında (bölge 1) bırakıldı.
 - Bekleyen APPLY varken yeni istek gönderilmez. CW/chirp değiştirilmeden önce
   mevcut akış kapatılır ve boru hattındaki eski örnekler boşaltılır.
 
