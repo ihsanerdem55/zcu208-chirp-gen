@@ -18,6 +18,10 @@ profile, `rfdc_restart`), and the generator returns disabled after any clock los
 
 ## Build and run
 
+**First time on a board? Follow the [step-by-step hardware bring-up guide](docs/bringup.md)**:
+each step has a pass check, and there's a troubleshooting table. The summary below
+assumes a board that has already been brought up.
+
 Vivado 2022.2+ with production ZCU208 board files, from the repository root:
 
 ```tcl

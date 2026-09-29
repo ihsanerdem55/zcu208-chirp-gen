@@ -1,5 +1,8 @@
 # ZCU208: tile 228, saat ve ILA ile chirp kontrolü
 
+Adım adım İngilizce kart devreye alma rehberi (her adımda geçme kriteri ve
+sorun giderme tablosu): [bringup.md](bringup.md).
+
 ## Düzeltilen sorunlar
 
 - CLK104 referans girişinin tile 230'a bağlı olduğu varsayımı yanlıştı.
