@@ -99,6 +99,11 @@ report_drc            -file out/drc.rpt
 **Pass:**
 
 - Timing reports "All user specified timing constraints are met".
+- In `report_clock_interaction`, the rows between `clk_out1_chirp_bd_clk_wiz_axi_0`
+  and `clk_out1_chirp_bd_clk_wiz_dac_0` show 0 failing endpoints. The
+  [Timing 38-127] "No common period" warnings for that pair are expected.
+- The implementation log has no critical warning that a `chirp_timing.xdc`
+  query found no objects.
 - No DRC errors.
 - In the CDC report, every crossing is either constrained or one of the
   intended ones: the first stage of `req_sync`, `ack_sync`, `rdy_sync`,
@@ -288,7 +293,8 @@ to remove RF for certain, disconnect it or power the board down.
 | ILA samples correct but no RF | Analog path | Check the XM655 channel, balun band, cables and attenuation, that `nco_set` was run, and the analyzer settings. |
 | `Expected one ila_dac` | `.ltx` missing or mismatched | Load the `.ltx` from the same build, then Refresh Device. |
 | `plot_ila.py`: `DAC not streaming (TREADY/TVALID low)` | Captured before the RFDC accepted data | Capture again after `rfdc_status` shows state 15. |
-| Build/implementation: `Cannot resolve chirp parameter CDC registers`, `Cannot resolve first stage of ...`, or `Expected one independent 100 MHz AXI clock net` | Synthesis renamed cells or nets that the CDC constraints and debug-hub hook look up | Find the real names with `get_cells`/`get_nets` and update the patterns. Never delete these constraints. |
+| Implementation: a critical warning that a `chirp_timing.xdc` constraint matched no objects, or `Expected one independent 100 MHz AXI clock net` | Synthesis renamed cells or nets that the CDC constraints and debug-hub hook look up | Find the real names with `get_cells`/`get_nets` and update the patterns. Never delete these constraints. |
+| Negative WNS only on `*_sync_reg[0]/D` endpoints between the AXI and DAC clocks | The synchronizer exceptions in `chirp_timing.xdc` were not applied | Check that the file is in the implementation constraint set, and look for the critical warning above. |
 
 ## Reference
 
