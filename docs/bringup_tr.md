@@ -21,6 +21,19 @@
 - Bekleyen APPLY varken yeni istek gönderilmez. CW/chirp değiştirilmeden önce
   mevcut akış kapatılır ve boru hattındaki eski örnekler boşaltılır.
 
+## 29 Eylül inceleme düzeltmeleri
+
+DAC resetinden sonra eski APPLY isteği artık tekrar uygulanmaz; çıkış kapalı
+kalır ve yeni bir CW/chirp komutu gerekir. Bekleyen aktarım sırasında parametre
+ve APPLY yazmaları donanımda SLVERR ile reddedilir. Sıfır WSTRB etkisizdir.
+`gen_off`, RFDC hazır değilken de çalışan generator domain'ini kapatabilir;
+`rfdc_restart` çıkışı kapalı bırakır. Saat tamamen durmuşsa kapatma onayı
+alınamaz; timeout, çıkışın kapandığı anlamına gelmez.
+
+CDC parametre yollarına süre/skew sınırı eklendi ve AXI reseti DAC resetine
+bağlandı. Yeni bitstream üret, timing/CDC raporlarını kontrol et.
+[İnceleme, test sonuçları ve kart kontrol listesi](review_2026-09-29.md).
+
 ## 1. Saat ve proje
 
 Bu ayarlar standart ZCU208 + CLK104 bağlantısını ve 245.76 MHz DAC referansını
@@ -63,7 +76,7 @@ clock_check
 ```
 
 Beklenen: tile **228**, state **15**, power-up **1**, PLL locked **1**,
-DAC reset released **1**, APPLY pending **0**, değişen heartbeat.
+DAC handshake ready **1**, APPLY pending **0**, değişen heartbeat.
 Heartbeat frekans ölçümü değildir; yalnızca fabric saatinin hareket ettiğini gösterir.
 
 Saat profili bitstream'den sonra yüklendiyse:
@@ -137,7 +150,7 @@ gecikmesini içermeyen dijital darbe işaretidir.
 
 ## 4. Doğrulama sınırı ve kaynaklar
 
-Yerel testte 49.368 RTL örneği sıfır uyuşmazlıkla geçti; frekans/darbe analizinde
+29 Eylül Verilator testinde 48.840 RTL örneği sıfır uyuşmazlıkla geçti; frekans/darbe analizinde
 10/10 kontrol ve CSV ayrıştırıcısında 6/6 test başarılı oldu. Tcl kontrol
 testleri de geçti. [Örnek grafik](chirp_interleaved_sim.png) RTL simülasyonudur.
 Bu testler RTL örneklerini ve Tcl/Python davranışını sınar. RFDC/ILA IP
@@ -149,3 +162,4 @@ ayrıca çalıştırılmalıdır. Bu depoda yeni bir doğrulanmış bitstream ve
 - [PG269 RF-DAC veri formatı](https://docs.amd.com/r/en-US/pg269-rf-data-converter/Interface-Data-Formats)
 - [UG908 debug clock kuralları](https://docs.amd.com/r/en-US/ug908-vivado-programming-debugging/Debug-Cores-Clocking-Guidelines)
 - [Üretim ZCU208 pin dosyası](https://github.com/Xilinx/XilinxBoardStore/blob/2022.2/boards/Xilinx/zcu208/production/2.0/part0_pins.xml)
+

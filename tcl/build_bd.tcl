@@ -111,6 +111,10 @@ create_bd_port -dir I -type rst cpu_reset
 set_property CONFIG.POLARITY ACTIVE_HIGH [get_bd_ports cpu_reset]
 set rst_axi [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_axi]
 set rst_dac [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_dac]
+set_property CONFIG.C_EXT_RESET_HIGH 1 $rst_axi
+set_property -dict [list CONFIG.C_EXT_RESET_HIGH 1 CONFIG.C_AUX_RESET_HIGH 1] $rst_dac
+# Losing/resetting AXI must also clear the DAC-side handshake and waveform.
+connect_bd_net [get_bd_pins rst_axi/peripheral_reset] [get_bd_pins rst_dac/aux_reset_in]
 
 # --- JTAG-to-AXI + SmartConnect -------------------------------------------------
 set jtag_axi [create_bd_cell -type ip -vlnv xilinx.com:ip:jtag_axi jtag_axi_0]
@@ -212,3 +216,4 @@ puts " 1. Double-click rfdc: only DAC tile 228 ch0 enabled (see settings above).
 puts " 2. trig_out is on LED0 (AR19); change it in the XDC if you want another pin."
 puts " 3. Flow Navigator > Generate Bitstream."
 puts "=================================================================="
+

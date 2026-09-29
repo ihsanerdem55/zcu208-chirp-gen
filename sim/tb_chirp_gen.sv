@@ -50,20 +50,22 @@ module tb_chirp_gen;
 
     // --------------------------------------------------------- AXI-Lite BFM
     task automatic axi_write(input logic [15:0] a, input logic [31:0] d);
-        @(posedge aclk);
-        awaddr <= a; wdata <= d; awvalid <= 1; wvalid <= 1;
+        @(negedge aclk);
+        awaddr = a; wdata = d; awvalid = 1; wvalid = 1;
         fork
-            begin do @(posedge aclk); while (!awready); awvalid <= 0; end
-            begin do @(posedge aclk); while (!wready);  wvalid  <= 0; end
+            begin do @(posedge aclk); while (!awready); @(negedge aclk); awvalid = 0; end
+            begin do @(posedge aclk); while (!wready);  @(negedge aclk); wvalid = 0; end
         join
         do @(posedge aclk); while (!bvalid);
+        if (bresp != 0) $fatal(1, "AXI write rejected at %h", a);
     endtask
 
     task automatic axi_read(input logic [15:0] a, output logic [31:0] d);
-        @(posedge aclk);
-        araddr <= a; arvalid <= 1;
+        @(negedge aclk);
+        araddr = a; arvalid = 1;
         do @(posedge aclk); while (!arready);
-        arvalid <= 0;
+        @(negedge aclk);
+        arvalid = 0;
         do @(posedge aclk); while (!rvalid);
         d = rdata;
     endtask
@@ -232,9 +234,9 @@ module tb_chirp_gen;
 
     initial begin
         repeat (10) @(posedge aclk);
-        aresetn = 1;
+        @(negedge aclk); aresetn = 1;
         repeat (5) @(posedge dclk);
-        drst_n = 1;
+        @(negedge dclk); drst_n = 1;
         repeat (5) @(posedge aclk);
 
         // T0: register access
@@ -301,3 +303,4 @@ module tb_chirp_gen;
         $fatal(1, "*** TEST FAILED: timeout ***");
     end
 endmodule
+

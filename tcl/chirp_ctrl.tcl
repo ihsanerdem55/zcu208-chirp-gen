@@ -59,7 +59,7 @@ proc chirp_wait_idle {{timeout_ms 1000}} {
     set deadline [expr {[clock milliseconds] + $timeout_ms}]
     while {1} {
         set st [creg_rd STATUS]
-        if {($st & 1) == 0} { error "DAC domain is in reset; run rfdc_status / clock_check" }
+        if {($st & 1) == 0} { error "DAC handshake is in reset/recovery; run rfdc_status / clock_check" }
         if {($st & 2) == 0} { return }
         if {[clock milliseconds] >= $deadline} {
             error "APPLY still pending; restore the DAC clock before retrying (do not toggle APPLY again)"
@@ -75,7 +75,6 @@ proc chirp_apply {} {
 
 # Disable using the CURRENT packing/swap flags, then drain the sample pipeline.
 proc chirp_prepare {} {
-    rfdc_require_running
     chirp_wait_idle
     creg_wr CTRL [expr {[creg_rd CTRL] & ~1}]
     chirp_apply
@@ -115,6 +114,7 @@ proc amplitude_word {amp} {
 proc cw {f_off {amp 0.5}} {
     set f0 [fword $f_off]
     set a [amplitude_word $amp]
+    rfdc_require_running
     chirp_prepare
     creg_wr FSTART $f0
     creg_wr KRATE  0
@@ -154,6 +154,7 @@ proc chirp {args} {
     set fw [fword $f0]
     fword $f1
     set phase [expr {wide(round(fmod($o(-phase_deg), 360.0) / 360.0 * 4294967296.0)) & 0xFFFFFFFF}]
+    rfdc_require_running
     chirp_prepare
     creg_wr FSTART $fw
     creg_wr KRATE  [expr {$k & 0xFFFFFFFF}]
@@ -191,7 +192,7 @@ proc rfdc_status {} {
     puts [format "DAC tile %d: state %d (15 = running), power-up %d, PLL locked %d" \
         [expr {228 + $::DAC_TILE}] $state [expr {($st >> 2) & 1}] [expr {($st >> 3) & 1}]]
     set cs [creg_rd STATUS]
-    puts [format "chirp_gen: DAC clock domain out of reset %d, apply pending %d" [expr {$cs & 1}] [expr {($cs >> 1) & 1}]]
+    puts [format "chirp_gen: DAC handshake ready %d, apply pending %d" [expr {$cs & 1}] [expr {($cs >> 1) & 1}]]
     if {$state != 15} {
         puts "Check CLK104 LMK DCLKout6 = 245.76 MHz to tile 228; use rfdc_restart after programming the clock."
     }
@@ -223,6 +224,10 @@ proc clock_check {{timeout_ms 1000}} {
 
 # re-run the tile power-on sequence (use after the clock was programmed late)
 proc rfdc_restart {} {
+    # If the fabric is alive, silence it before restarting. If it is in reset,
+    # the RTL remains disabled on recovery. A stopped clock without reset cannot
+    # acknowledge silence: fail instead of restarting with an armed waveform.
+    if {[creg_rd STATUS] & 1} { gen_off }
     set b [rfdc_tile_ctrl]
     wr32 [expr {$b + 0x08}] 0x010F      ;# start state 1, end state 15
     wr32 [expr {$b + 0x04}] 0x1         ;# restart
@@ -232,6 +237,7 @@ proc rfdc_restart {} {
         if {![catch {rfdc_require_running}]} {
             rfdc_status
             clock_check
+            gen_off
             return
         }
     }
@@ -257,3 +263,4 @@ proc nco_set {f_hz} {
     wr32 [expr {$b + 0x20}] [expr {($d & ~0xF) | 0x2}]
     puts [format "NCO = %.6f MHz" [expr {$f_hz / 1e6}]]
 }
+

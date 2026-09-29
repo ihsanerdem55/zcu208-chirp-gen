@@ -8,6 +8,12 @@ Vivado JTAG-to-AXI control; no Vitis/PetaLinux required.
 Tile 230 uses a separate external SMA clock path. The original tile-230 assumption
 and default split-I/Q packing were incorrect for this setup.
 
+**Board readiness:** the branch includes reset/CDC fixes, but still requires a
+fresh Vivado build, timing/CDC review and a controlled RF measurement. See the
+[29 September review and bring-up checks](docs/review_2026-09-29.md).
+DAC-domain reset now leaves output disabled until a fresh APPLY; a tile restart
+also leaves output off.
+
 ## Build and run
 
 Vivado 2022.2+ with production ZCU208 board files, from the repository root:
@@ -59,6 +65,8 @@ probe map, expected results, clock path, balun bandwidth and hardware checks.
 ```sh
 # Icarus Verilog 12+, Python with requirements above, Tcl 8.5+
 bash sim/run_iverilog.sh
+# Alternative: Verilator 5+ and a C++20 compiler
+# bash sim/run_verilator.sh
 ```
 
 The RTL testbench checks every sample against a bit-exact reference and includes
@@ -74,3 +82,4 @@ remain required; host tests cannot validate the RFDC PLL or analog output.
 ![Interleaved chirp RTL simulation](docs/chirp_interleaved_sim.png)
 
 This plot comes from RTL simulation, not a ZCU208 hardware capture.
+

@@ -1,8 +1,19 @@
-# Implementation-only: generated clocks exist after synthesis.
-# All AXI/DAC crossings use the toggle handshake or two-stage status synchronizers.
-set axi_clks [get_clocks -of_objects [get_nets -hier -filter {NAME =~ */axi_clk_100m}]]
-set dac_clks [get_clocks -of_objects [get_nets -hier -filter {NAME =~ */dac_clk_184m}]]
-if {![llength $axi_clks] || ![llength $dac_clks]} {
-    error "Cannot resolve AXI/DAC clocks; inspect clock names before implementation"
+# Implementation-only CDC constraints. Do not use set_clock_groups here: that
+# would override the max-delay bound on the bundled parameter transfer.
+# req_sync gives data at least two DAC clocks to settle. Bound data propagation
+# and skew to one DAC period (5.425 ns), leaving a full cycle of margin.
+set src [get_cells -hier -regexp {.*u_regs/r_(ctrl|fstart|krate|pw|pri|amp|phase0)_reg(\[[0-9]+\])?}]
+set dst [get_cells -hier -regexp {.*u_regs/(enable|cw_mode|iq_swap|pack_ilv|f_start|k_rate|pw|pri|amp|phase0)_reg(\[[0-9]+\])?}]
+if {![llength $src] || ![llength $dst]} {
+    error "Cannot resolve chirp parameter CDC registers; inspect synthesized names"
 }
-set_clock_groups -asynchronous -group $axi_clks -group $dac_clks
+set_max_delay -datapath_only 5.425 -from $src -to $dst
+set_bus_skew 5.425 -from $src -to $dst
+
+# Only the first stage of each single-bit synchronizer is asynchronous.
+# The stage-0 to stage-1 paths must still meet destination-clock timing.
+foreach sync {req_sync ack_sync rdy_sync hb_sync} {
+    set first [get_cells -hier -regexp ".*u_regs/${sync}_reg\\\[0\\\]"]
+    if {[llength $first] != 1} { error "Cannot resolve first stage of $sync" }
+    set_false_path -to [get_pins -of_objects $first -filter {REF_PIN_NAME == D}]
+}

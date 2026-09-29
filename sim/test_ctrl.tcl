@@ -16,8 +16,9 @@ proc creg_wr {name value} {
 }
 rename rd32 real_rd32
 rename wr32 real_wr32
+set tile_state 15
 proc rd32 {address} {
-    if {$address == 0x4004400C} { return 15 }
+    if {$address == 0x4004400C} { return $::tile_state }
     if {$address == 0x40044228} { return 12 }
     return 0
 }
@@ -58,3 +59,26 @@ assert {[lindex [lindex $writes 0] 0] == 0x4004609C} "NCO writes tile 228"
 assert {[lindex [lindex $writes 0] 1] == ($word & 65535)} "NCO low word"
 assert {[lindex [lindex $writes end] 0] == 0x40046020} "NCO update register"
 puts "PASS: control defaults, range checks, pending APPLY, reconfiguration and NCO addresses"
+
+
+# Disabling must remain available with an unhealthy tile but live DAC fabric.
+set tile_state 6
+set control 11
+set writes {}
+gen_off
+assert {$control == 10} "gen_off failed to disable during tile recovery"
+assert {[lsearch -exact $writes {APPLY 1}] >= 0} "disable was not applied"
+rejects_without_writes {cw 10e6}
+rejects_without_writes {chirp}
+set tile_state 15
+puts "PASS: gen_off with unhealthy RFDC; enabling still requires a running tile"
+
+rename clock_check real_clock_check
+proc clock_check {} { return 1 }
+set control 11
+set writes {}
+rfdc_restart
+assert {[lindex $writes 0] eq {CTRL 10}} "restart must disable first"
+assert {[lindex $writes end] eq {APPLY 1}} "restart must finish with disabled APPLY"
+assert {$control == 10} "restart re-enabled waveform"
+puts "PASS: RFDC restart silences the generator"
