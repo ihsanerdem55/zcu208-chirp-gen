@@ -12,7 +12,8 @@ set_bus_skew 5.425 -from $src -to $dst
 
 # Only the first stage of each single-bit synchronizer is asynchronous.
 # The stage-0 to stage-1 paths must still meet destination-clock timing.
-foreach sync {req_sync ack_sync rdy_sync hb_sync} {
+# lock_sync samples the unclocked clk_wiz_dac LOCKED output.
+foreach sync {req_sync ack_sync rdy_sync hb_sync lock_sync} {
     set first [get_cells -hier -regexp ".*u_regs/${sync}_reg\\\[0\\\]"]
     if {[llength $first] != 1} { error "Cannot resolve first stage of $sync" }
     set_false_path -to [get_pins -of_objects $first -filter {REF_PIN_NAME == D}]

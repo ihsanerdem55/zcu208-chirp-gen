@@ -43,6 +43,7 @@ module tb_chirp_gen;
         .s_axi_bresp(bresp), .s_axi_bvalid(bvalid), .s_axi_bready(bready),
         .s_axi_araddr(araddr), .s_axi_arvalid(arvalid), .s_axi_arready(arready),
         .s_axi_rdata(rdata), .s_axi_rresp(rresp), .s_axi_rvalid(rvalid), .s_axi_rready(rready),
+        .dac_mmcm_locked(1'b1), .dac_mmcm_reset(), .dac_domain_reset(),
         .dac_clk(dclk), .dac_rst_n(drst_n),
         .m_axis_tdata(tdata), .m_axis_tvalid(tvalid), .m_axis_tready(1'b1),
         .trig_out(trig)
@@ -244,8 +245,10 @@ module tb_chirp_gen;
         if (v !== 32'h43485250) begin $display("FAIL T0: ID = %h", v); errors++; end
         else $display("PASS T0: ID register = %h (CHRP)", v);
         axi_read(16'h24, v);
-        if (v[0] !== 1'b1) begin $display("FAIL T0: STATUS ready bit = %b", v[0]); errors++; end
-        else $display("PASS T0: DAC clock domain reported ready");
+        if (v[0] !== 1'b1 || v[3] !== 1'b1) begin
+            $display("FAIL T0: STATUS ready/MMCM-locked bits = %b/%b", v[0], v[3]); errors++;
+        end
+        else $display("PASS T0: DAC clock domain reported ready, MMCM locked");
 
         // T1: CW +10 MHz, full scale
         $display("T1: CW +10 MHz, full scale, split packing");

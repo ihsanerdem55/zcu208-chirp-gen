@@ -12,15 +12,24 @@
 //   0x1C PHASE0  RW  start phase (2*pi = 2^32)
 //   0x20 APPLY   WO  write with any byte strobe: copy all RW registers into the DAC clock domain
 //   0x24 STATUS  RO  [0] DAC-domain handshake ready  [1] apply pending  [2] DAC-clock heartbeat
+//                    [3] DAC fabric-clock MMCM locked
 //
 // Nothing written to 0x04..0x1C reaches the generator until APPLY is written.
 // CDC: toggle handshake. Software must wait for STATUS[1] = 0 before changing
 // registers again (the Tcl helpers do this). Hardware rejects writes while busy.
 // DAC reset aborts a request and leaves output disabled; explicitly APPLY again
 // after STATUS[0] returns. The old toggle is baselined, never replayed.
+//
+// DAC MMCM supervision (AXI clock): the MMCM input rfdc/clk_dac0 is absent at
+// configuration and stops during every tile restart. An MMCM must be reset after
+// LOCKED falls, so dac_mmcm_reset is pulsed every 2^WD_BITS clocks while unlocked.
+// dac_domain_reset holds the DAC reset controller until lock has been stable for
+// 2^LOCK_BITS clocks, so a waveform frozen by a clock loss is cleared, not resumed.
 // -----------------------------------------------------------------------------
 module chirp_axil_regs #(
-    parameter int ADDR_W = 16
+    parameter int ADDR_W    = 16,
+    parameter int WD_BITS   = 18,          // 2.6 ms at 100 MHz, > 100 us MMCM lock time
+    parameter int LOCK_BITS = 7            // 1.28 us of stable lock at 100 MHz
 ) (
     // AXI4-Lite slave, s_axi_aclk domain
     input  logic               s_axi_aclk,
@@ -42,6 +51,10 @@ module chirp_axil_regs #(
     output logic [1:0]         s_axi_rresp,
     output logic               s_axi_rvalid,
     input  logic               s_axi_rready,
+    // DAC fabric-clock MMCM supervision, s_axi_aclk domain
+    input  logic               dac_mmcm_locked,   // asynchronous clk_wiz_dac/locked
+    output logic               dac_mmcm_reset,    // clk_wiz_dac/reset, active high
+    output logic               dac_domain_reset,  // DAC reset controller aux input, active high
     // parameter outputs, dac_clk domain
     input  logic               dac_clk,
     input  logic               dac_rst_n,
@@ -218,12 +231,43 @@ module chirp_axil_regs #(
     logic [23:0] hb_cnt = '0;
     always_ff @(posedge dac_clk) hb_cnt <= hb_cnt + 1'b1;   // heartbeat, ~11 Hz toggle
 
-    (* ASYNC_REG = "TRUE" *) logic [1:0] ack_sync = '0, rdy_sync = '0, hb_sync = '0;
+    (* ASYNC_REG = "TRUE" *) logic [1:0] ack_sync = '0;
+    (* ASYNC_REG = "TRUE" *) logic [1:0] rdy_sync = '0;
+    (* ASYNC_REG = "TRUE" *) logic [1:0] hb_sync  = '0;
     always_ff @(posedge s_axi_aclk) begin
         ack_sync <= {ack_sync[0], ack_tgl};
         rdy_sync <= {rdy_sync[0], dac_online};
         hb_sync  <= {hb_sync[0],  hb_cnt[23]};
     end
-    assign status = {29'd0, hb_sync[1], (req_tgl != ack_sync[1]), rdy_sync[1]};
+
+    // ================================= DAC MMCM supervision (AXI clock domain)
+    (* ASYNC_REG = "TRUE" *) logic [1:0] lock_sync = '0;
+    logic [WD_BITS-1:0] unlock_cnt = '0;
+    logic [LOCK_BITS:0] lock_cnt   = '0;
+    logic               mmcm_rst_q = 1'b0;
+    logic               dom_rst_q  = 1'b1;
+    always_ff @(posedge s_axi_aclk) begin
+        lock_sync <= {lock_sync[0], dac_mmcm_locked};
+        if (!s_axi_aresetn) begin
+            unlock_cnt <= '0;
+            lock_cnt   <= '0;
+            mmcm_rst_q <= 1'b0;
+            dom_rst_q  <= 1'b1;                       // AXI reset also resets the DAC side
+        end else if (!lock_sync[1]) begin
+            unlock_cnt <= unlock_cnt + 1'b1;
+            lock_cnt   <= '0;
+            mmcm_rst_q <= &unlock_cnt[WD_BITS-1:4];   // last 16 clocks of each period
+            dom_rst_q  <= 1'b1;
+        end else begin
+            unlock_cnt <= '0;
+            mmcm_rst_q <= 1'b0;
+            if (!lock_cnt[LOCK_BITS]) lock_cnt <= lock_cnt + 1'b1;
+            dom_rst_q  <= !lock_cnt[LOCK_BITS];
+        end
+    end
+    assign dac_mmcm_reset   = mmcm_rst_q;
+    assign dac_domain_reset = dom_rst_q;
+
+    assign status = {28'd0, lock_sync[1], hb_sync[1], (req_tgl != ack_sync[1]), rdy_sync[1]};
 endmodule
 

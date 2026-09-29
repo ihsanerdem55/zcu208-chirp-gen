@@ -34,6 +34,29 @@ CDC parametre yollarına süre/skew sınırı eklendi ve AXI reseti DAC resetine
 bağlandı. Yeni bitstream üret, timing/CDC raporlarını kontrol et.
 [İnceleme, test sonuçları ve kart kontrol listesi](review_2026-09-29.md).
 
+## 29 Eylül ikinci inceleme (kart hazırlığı)
+
+- **DAC MMCM reseti eksikti.** `clk_wiz_dac` girişi `rfdc/clk_dac0`,
+  konfigürasyon anında yoktur ve her tile yeniden başlatmasında durur. MMCM,
+  LOCKED düştükten sonra resetlenmelidir. Reset pini olmadığı için
+  `rfdc_restart` veya geç yüklenen CLK104 profili; DAC fabric saatini, ILA'yı
+  ve heartbeat'i yeniden programlamaya kadar durdurabiliyordu. Artık bağımsız
+  AXI saatindeki denetleyici, kilit yokken ~2,6 ms'de bir 160 ns reset darbesi
+  verir. Kilit 1,28 µs kararlı kalana kadar DAC reset denetleyicisini
+  (`rst_dac/aux_reset_in`) resette tutar. **STATUS bit 3 = MMCM kilitli.**
+- Saat kaybından sonra DAC domain'i her yeniden kilitlenmede resetlenir; eski
+  dalga şekli kaldığı yerden devam edemez. Bu yüzden `rfdc_restart`, fabric
+  saati zaten kaybolmuşken de güvenle çalışır.
+- `run_hw_axi -quiet` başarısız işlemlerde bile TCL_OK döndürüyordu. Zaman
+  aşımı, JTAG bağlantı kaybı ve SLVERR görünmüyordu. `-quiet` kaldırıldı; hata
+  artık adresle birlikte bildirilir.
+- `rfdc_status`; interpolation, I/Q giriş, datapath modu ve fabric word
+  değerlerini okur. `cw`, `chirp` ve `nco_set`, 8x / I/Q / tam bant datapath
+  dışındaki bir ayarda çalışmayı reddeder. Yalnızca tanı için:
+  `set ::RFDC_CONFIG_CHECK 0`.
+- `gen_off`, DAC domain'i resetteyken başarılı sayılır, çünkü reset enable'ı
+  sıfırda tutar. Canlı ama onay vermeyen handshake ise hâlâ hatadır.
+
 ## 1. Saat ve proje
 
 Bu ayarlar standart ZCU208 + CLK104 bağlantısını ve 245.76 MHz DAC referansını
@@ -59,7 +82,8 @@ anda hem kartta hem RFDC IP'de değiştirmen gerekir.
 
 `USER_SI570_C0` 300 MHz -> AXI Clock Wizard 100 MHz;
 `CLK104` 245.76 MHz -> RFDC tile 228 PLL -> `clk_dac0` 184.32 MHz ->
-DAC Clock Wizard -> chirp, RFDC AXIS ve ILA.
+DAC Clock Wizard -> chirp, RFDC AXIS ve ILA. DAC Clock Wizard'ın reseti,
+AXI saatindeki `chirp_gen_0/dac_mmcm_reset` tarafından sürülür.
 Kart pinleri üretim board store 2.0 dosyasına göre AP20/AP19, reset AU1,
 LED0 AR19 olarak korunmuştur. Eski UG1410 revizyonundaki pin tablosu ile
 üretim board dosyası farklılık gösterebilir; kendi kart revizyonunla eşleştir.
@@ -76,7 +100,9 @@ clock_check
 ```
 
 Beklenen: tile **228**, state **15**, power-up **1**, PLL locked **1**,
-DAC handshake ready **1**, APPLY pending **0**, değişen heartbeat.
+DAC MMCM locked **1**, handshake ready **1**, APPLY pending **0**,
+interpolation **8x**, I/Q input **1**, datapath mode **0**, değişen heartbeat.
+Raporlanan fabric word sayısını not et; bu değer henüz kartta doğrulanmadı.
 Heartbeat frekans ölçümü değildir; yalnızca fabric saatinin hareket ettiğini gösterir.
 
 Saat profili bitstream'den sonra yüklendiyse:
@@ -87,7 +113,9 @@ rfdc_restart
 
 State 15'e ulaşmıyorsa önce referans frekansı/çıkış enable, PLL ayarı ve
 `clk_wiz_dac` kilidini kontrol et. State 6 tek başına hatanın hangi kabloda
-olduğunu kanıtlamaz. Eski tasarıma ait .bit/.ltx veya tile 230 bağlantısı
+olduğunu kanıtlamaz. Tile state 15'te ama `DAC MMCM locked 0` ise donanım
+MMCM resetini ~2,6 ms'de bir tekrarlar; durum kalıcıysa `clk_dac0`
+frekansını ve RFDC fabric saat ayarını kontrol et. Eski tasarıma ait .bit/.ltx veya tile 230 bağlantısı
 kullanılmadığından emin ol. APPLY timeout sonrası aynı APPLY'ı tekrar
 çevirmek yerine saati düzelt; kurtarılamayan durumda yeniden programla.
 
@@ -97,9 +125,9 @@ LF balun yolundaki 10 MHz–1 GHz bandı içinde kalır. 1.5 GHz merkez kullanac
 
 ```tcl
 nco_set 500e6
-cw 10e6 0.5
-# Beklenen RF ton: yaklaşık 510 MHz
-chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -amp 0.5
+cw 10e6 0.1
+# Beklenen RF ton: yaklaşık 510 MHz. İlk ölçümde düşük genlikle başla.
+chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -amp 0.1
 # Baseband: -200 .. +200 MHz; RF: yaklaşık 300 .. 700 MHz
 # Yuvarlanmış süreler: PW 369 clock (~2.002 us), PRI 1843 clock (~9.999 us)
 ```

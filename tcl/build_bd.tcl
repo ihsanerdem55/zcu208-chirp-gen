@@ -97,12 +97,19 @@ set_property CONFIG.FREQ_HZ 300000000 [get_bd_intf_ports sysclk_300]
 connect_bd_intf_net [get_bd_intf_ports sysclk_300] [get_bd_intf_pins clk_wiz_axi/CLK_IN1_D]
 
 # --- DAC fabric clock: rfdc/clk_dac0 -> Clocking Wizard (MMCM) ---------------
+# clk_dac0 is absent at configuration and stops on every tile restart; an MMCM
+# must be reset after LOCKED falls. chirp_gen_0 drives this reset from the
+# independent AXI clock and retries it until the MMCM locks.
 set clk_wiz_dac [create_bd_cell -type ip -vlnv xilinx.com:ip:clk_wiz clk_wiz_dac]
 set_property -dict [list \
     CONFIG.PRIM_SOURCE {No_buffer} \
     CONFIG.PRIM_IN_FREQ {184.320} \
     CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {184.320} \
-    CONFIG.USE_RESET {false} ] $clk_wiz_dac
+    CONFIG.USE_RESET {true} \
+    CONFIG.RESET_TYPE {ACTIVE_HIGH} ] $clk_wiz_dac
+if {[llength [get_bd_pins -quiet clk_wiz_dac/reset]] != 1} {
+    error "clk_wiz_dac has no active-high 'reset' pin; the DAC MMCM could never relock"
+}
 
 # --- resets -------------------------------------------------------------------
 # CPU_RESET push-button (pin AU1 in the XDC, active high). The reset blocks read
@@ -113,8 +120,6 @@ set rst_axi [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_axi]
 set rst_dac [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset rst_dac]
 set_property CONFIG.C_EXT_RESET_HIGH 1 $rst_axi
 set_property -dict [list CONFIG.C_EXT_RESET_HIGH 1 CONFIG.C_AUX_RESET_HIGH 1] $rst_dac
-# Losing/resetting AXI must also clear the DAC-side handshake and waveform.
-connect_bd_net [get_bd_pins rst_axi/peripheral_reset] [get_bd_pins rst_dac/aux_reset_in]
 
 # --- JTAG-to-AXI + SmartConnect -------------------------------------------------
 set jtag_axi [create_bd_cell -type ip -vlnv xilinx.com:ip:jtag_axi jtag_axi_0]
@@ -142,7 +147,12 @@ connect_bd_intf_net [get_bd_intf_pins axi_sc/M01_AXI]   [get_bd_intf_pins rfdc/s
 connect_bd_net [get_bd_pins rfdc/clk_dac0] [get_bd_pins clk_wiz_dac/clk_in1]
 connect_bd_net -net dac_clk_184m $dac_clk [get_bd_pins rst_dac/slowest_sync_clk] [get_bd_pins chirp_gen_0/dac_clk] \
     [get_bd_pins rfdc/s0_axis_aclk]
-connect_bd_net [get_bd_pins clk_wiz_dac/locked] [get_bd_pins rst_dac/dcm_locked]
+connect_bd_net [get_bd_pins clk_wiz_dac/locked] [get_bd_pins rst_dac/dcm_locked] \
+    [get_bd_pins chirp_gen_0/dac_mmcm_locked]
+connect_bd_net [get_bd_pins chirp_gen_0/dac_mmcm_reset] [get_bd_pins clk_wiz_dac/reset]
+# AXI reset or a DAC-clock loss must also clear the DAC-side handshake and
+# waveform; dac_domain_reset stays high until the MMCM lock is stable again.
+connect_bd_net [get_bd_pins chirp_gen_0/dac_domain_reset] [get_bd_pins rst_dac/aux_reset_in]
 connect_bd_net [get_bd_pins rst_dac/peripheral_aresetn] [get_bd_pins chirp_gen_0/dac_rst_n] \
     [get_bd_pins rfdc/s0_axis_aresetn]
 connect_bd_intf_net [get_bd_intf_pins chirp_gen_0/m_axis] [get_bd_intf_pins rfdc/s00_axis]

@@ -12,7 +12,9 @@ and default split-I/Q packing were incorrect for this setup.
 fresh Vivado build, timing/CDC review and a controlled RF measurement. See the
 [29 September review and bring-up checks](docs/review_2026-09-29.md).
 DAC-domain reset now leaves output disabled until a fresh APPLY; a tile restart
-also leaves output off.
+also leaves output off. The DAC fabric-clock MMCM is supervised from the
+independent AXI clock: it is reset automatically until it relocks (late CLK104
+profile, `rfdc_restart`), and the generator returns disabled after any clock loss.
 
 ## Build and run
 
@@ -32,11 +34,13 @@ starting the RFDC. These scripts do not program the clock card.
 ```tcl
 source tcl/chirp_ctrl.tcl
 hw_init
-rfdc_status                 ;# tile 228: state 15, power-up 1, PLL locked 1
+rfdc_status                 ;# tile 228: state 15, power-up 1, PLL locked 1, MMCM locked 1
+                            ;# DAC ch0: interpolation 8x, I/Q input 1, datapath mode 0
 clock_check                 ;# changing DAC fabric heartbeat
 # rfdc_restart              ;# if clocks were configured after the bitstream
 nco_set 500e6
-chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -amp 0.5
+cw 10e6 0.1                 ;# first check: ~510 MHz tone at low amplitude
+chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -amp 0.1
 source tcl/ila_capture.tcl
 ila_capture out/chirp.csv
 # gen_off
@@ -70,8 +74,9 @@ bash sim/run_iverilog.sh
 ```
 
 The RTL testbench checks every sample against a bit-exact reference and includes
-an interleaved pulsed chirp capture. Tcl tests mock AXI accesses; Python tests
-check signed lane reconstruction and invalid captures. For Vivado xsim use
+an interleaved pulsed chirp capture. A register testbench covers CDC recovery and
+the DAC MMCM reset/lock supervision. Tcl tests mock AXI accesses and RFDC
+read-back; Python tests check signed lane reconstruction and invalid captures. For Vivado xsim use
 `source tcl/sim_project.tcl` or `sim/run_xsim.bat` / `sim/run_xsim.sh`.
 
 Vivado IP validation, synthesis/implementation timing and board measurements
