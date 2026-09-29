@@ -153,7 +153,7 @@ ila_capture out/chirp.csv
 | ILA probu | İçerik |
 |---|---|
 | probe0 | 128-bit DAC giriş verisi |
-| probe1 | trig_out, darbe işareti |
+| probe1 | darbe işareti (`mon_gate`, `trig_out` ile aynı) |
 | probe2 / probe3 | TVALID / TREADY |
 | probe4 / probe5 | I0 / Q0 |
 | probe6 / probe7 | I1 / Q1 |

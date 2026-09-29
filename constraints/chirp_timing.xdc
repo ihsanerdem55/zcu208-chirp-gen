@@ -18,3 +18,10 @@ foreach sync {req_sync ack_sync rdy_sync hb_sync lock_sync} {
     if {[llength $first] != 1} { error "Cannot resolve first stage of $sync" }
     set_false_path -to [get_pins -of_objects $first -filter {REF_PIN_NAME == D}]
 }
+
+# AXI-clocked reset levels into the DAC side: dac_domain_reset feeds the DAC
+# reset controller's auxiliary input (synchronized inside proc_sys_reset) and
+# dac_mmcm_reset the asynchronous MMCM RST pin. Neither is a timed transfer.
+set rst_src [get_cells -hier -regexp {.*u_regs/(dom_rst_q|mmcm_rst_q)_reg}]
+if {[llength $rst_src] != 2} { error "Cannot resolve DAC reset supervision registers" }
+set_false_path -from $rst_src

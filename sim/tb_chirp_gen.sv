@@ -34,7 +34,7 @@ module tb_chirp_gen;
     logic [31:0] wdata = 0, rdata;
     logic [1:0]  bresp, rresp;
     logic [LANES*32-1:0] tdata, mon_data;
-    logic tvalid, trig, mon_valid, mon_ready;
+    logic tvalid, trig, mon_valid, mon_ready, mon_gate;
 
     chirp_gen_wrapper #(.LANES(LANES)) dut (
         .s_axi_aclk(aclk), .s_axi_aresetn(aresetn),
@@ -47,14 +47,20 @@ module tb_chirp_gen;
         .dac_clk(dclk), .dac_rst_n(drst_n),
         .m_axis_tdata(tdata), .m_axis_tvalid(tvalid), .m_axis_tready(1'b1),
         .trig_out(trig),
-        .mon_data(mon_data), .mon_valid(mon_valid), .mon_ready(mon_ready)
+        .mon_data(mon_data), .mon_valid(mon_valid), .mon_ready(mon_ready),
+        .mon_gate(mon_gate)
     );
 
-    // The ILA monitor ports must mirror the RFDC stream exactly.
+    // The ILA monitor ports must equal the RFDC stream and gate one clock later.
     int mon_errors = 0;
+    logic [LANES*32-1:0] tdata_q;
+    logic tvalid_q, trig_q1, mon_armed = 0;
     always @(posedge dclk) begin
         #1;
-        if (mon_data !== tdata || mon_valid !== tvalid || mon_ready !== 1'b1) mon_errors++;
+        if (mon_armed && (mon_data !== tdata_q || mon_valid !== tvalid_q ||
+                          mon_gate !== trig_q1 || mon_ready !== 1'b1)) mon_errors++;
+        tdata_q = tdata; tvalid_q = tvalid; trig_q1 = trig;
+        mon_armed = drst_n;
     end
 
     // --------------------------------------------------------- AXI-Lite BFM

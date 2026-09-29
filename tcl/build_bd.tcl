@@ -185,7 +185,7 @@ if {$ADD_ILA} {
     foreach w $ila_widths { lappend cfg CONFIG.C_PROBE${n}_WIDTH $w; incr n }
     set_property -dict $cfg $ila
     connect_bd_net $dac_clk [get_bd_pins ila_dac/clk]
-    foreach {probe signal} {0 mon_data 1 trig_out 2 mon_valid 3 mon_ready} {
+    foreach {probe signal} {0 mon_data 1 mon_gate 2 mon_valid 3 mon_ready} {
         connect_bd_net [get_bd_pins chirp_gen_0/$signal] [get_bd_pins ila_dac/probe$probe]
     }
     for {set n 0} {$n < 8} {incr n} {

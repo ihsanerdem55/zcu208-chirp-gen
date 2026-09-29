@@ -42,7 +42,7 @@ def read_capture(path, columns=None, interleaved=True):
     indices = {}
     # The block design probes the chirp_gen_0/mon_* copies of the stream.
     for key, (signals, port) in {
-        "data": (("m_axis_tdata", "mon_data"), 0), "gate": (("trig_out",), 1),
+        "data": (("m_axis_tdata", "mon_data"), 0), "gate": (("trig_out", "mon_gate"), 1),
         "valid": (("m_axis_tvalid", "mon_valid"), 2), "ready": (("m_axis_tready", "mon_ready"), 3),
     }.items():
         if columns.get(key):

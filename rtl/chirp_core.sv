@@ -13,6 +13,15 @@
 //     f[N+L]   = f[N]   + L*K
 // All accumulators are 48-bit Q32.16 (16 fractional bits) and wrap modulo 2^48.
 //
+// Timing structure (LANES = 4, 184.32 MHz): the multiples of f and K are kept
+// in their own accumulators, so every recurrence is one 2-operand 48-bit add:
+//     g = 4f + 6K   ->  phi' = phi + g,   g' = g + 16K
+//     h = 3f + 3K   ->  lane 3 = phi + h, h' = h + 12K
+//     f' = f + 4K;  lane 1 = phi + f;  lane 2 = phi + 2f + K
+// Constants derived from the parameters are registered every clock. The first
+// block after a parameter load is generated one clock after params_load, so the
+// registered constants are always current when used.
+//
 // Register units (captured on params_load):
 //   f_start : signed 32-bit, f_Hz  = f_start * fs_bb / 2^32
 //   k_rate  : signed Q24.8,  slope = (k_rate/256) * fs_bb^2 / 2^32   [Hz/s]
@@ -47,7 +56,11 @@ module chirp_core #(
 );
     localparam int W        = 48;          // accumulator width, Q32.16
     localparam int ROM_LAT  = 3;           // sincos_qw_rom latency
-    localparam int PIPE     = 1 + ROM_LAT + 1; // lane-phase reg + ROM + amplitude stage
+    localparam int PIPE     = 2 + ROM_LAT + 1; // lane stages A/B + ROM + amplitude stage
+
+    if (LANES != 4) begin : g_lanes_check
+        $error("chirp_core: the phase datapath is written for LANES = 4");
+    end
 
     // ------------------------------------------------------------------ params
     logic [W-1:0] F0, K, P0;
@@ -58,14 +71,32 @@ module chirp_core #(
     logic [15:0] amp_c;                    // clamp to <= 0x7FFF so the product never overflows
     assign amp_c = amp[15] ? 16'h7FFF : amp;
 
+    // ------------------------------------------------------ derived constants
+    // Registered every clock from quasi-static parameters (see header).
+    logic [W-1:0] k4, k12, k16, g0, h0;
+    logic [31:0]  pri_m1, pw_m1;
+    logic         pw_nz;
+    always_ff @(posedge clk) begin
+        k4     <= K << 2;
+        k12    <= (K << 3) + (K << 2);
+        k16    <= K << 4;
+        g0     <= ((F0 + K) << 2) + (K << 1);  // 4*F0 + 6*K
+        h0     <= (F0 + K) + ((F0 + K) << 1);  // 3*F0 + 3*K
+        pri_m1 <= pri - 32'd1;                 // pri >= 1 (register block clamps 0)
+        pw_m1  <= pw - 32'd1;
+        pw_nz  <= (pw != 0);
+    end
+
     // ------------------------------------------------------------ pulse timer
     // cnt, start and gate all describe the block being generated this clock.
-    // start/gate are registered (computed from the next count) to keep the
-    // compare logic out of the 48-bit accumulator path.
-    logic [31:0] cnt, cnt_nxt;
-    logic        start, gate;
+    // The wrap and pulse-width compares run in parallel on the current count:
+    // cnt never exceeds pri-1 (it restarts on every load), so cnt+1 < pw is
+    // cnt < pw-1 when pw > 0, and the next count is 0 exactly when it wraps.
+    logic [31:0] cnt;
+    logic        gate, wrap;
+    (* max_fanout = 32 *) logic start;     // selects 4 x 48 accumulator bits
 
-    assign cnt_nxt = (cnt >= pri - 32'd1) ? 32'd0 : cnt + 32'd1;   // pri must be >= 1
+    assign wrap = (cnt >= pri_m1);
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
@@ -78,39 +109,47 @@ module chirp_core #(
             start <= 1'b1;
             gate  <= enable && (cw_mode || (pw != 0));
         end else begin
-            cnt   <= cnt_nxt;
-            start <= cw_mode ? 1'b0 : (cnt_nxt == 0);   // CW: phase runs freely
-            gate  <= cw_mode || (cnt_nxt < pw);
+            cnt   <= wrap ? 32'd0 : cnt + 32'd1;
+            start <= !cw_mode && wrap;                   // CW: phase runs freely
+            gate  <= cw_mode || (wrap ? pw_nz : (pw_nz && (cnt < pw_m1)));
         end
     end
 
     // -------------------------------------------------- chirp accumulators
-    logic [W-1:0] phi_r, f_r;              // state for the *next* block
-    logic [W-1:0] blk_phi, blk_f;          // state for *this* block
+    logic [W-1:0] phi_r, f_r, g_r, h_r;    // state for the *next* block
+    logic [W-1:0] blk_phi, blk_f, blk_g, blk_h;  // state for *this* block
     assign blk_phi = start ? P0 : phi_r;
     assign blk_f   = start ? F0 : f_r;
-
-    // constants  L*K  and  K*L*(L-1)/2
-    localparam logic [W-1:0] L_W   = W'(LANES);
-    localparam int             TRI_I = LANES * (LANES - 1) / 2;
-    localparam logic [W-1:0] TRI_L = W'(TRI_I);
+    assign blk_g   = start ? g0 : g_r;
+    assign blk_h   = start ? h0 : h_r;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             phi_r <= '0;
             f_r   <= '0;
+            g_r   <= '0;
+            h_r   <= '0;
         end else begin
-            phi_r <= blk_phi + L_W * blk_f + TRI_L * K;
-            f_r   <= blk_f + L_W * K;
+            phi_r <= blk_phi + blk_g;      // phi + 4f + 6K
+            f_r   <= blk_f   + k4;         // f + 4K
+            g_r   <= blk_g   + k16;        // 4(f + 4K) + 6K
+            h_r   <= blk_h   + k12;        // 3(f + 4K) + 3K
         end
     end
 
-    // lane phases (stage 1)
+    // lane phases: stage A registers the block terms, stage B adds them
+    //   lane m = phi + m*f + K*m*(m-1)/2  ->  phi, phi + f, phi + 2f + K, phi + h
+    logic [W-1:0] phi_a, t1_a, t2_a, t3_a;
     logic [W-1:0] lane_phi [LANES];
-    for (genvar m = 0; m < LANES; m++) begin : g_phi
-        localparam int TRI_M = (m * (m - 1)) / 2;        // K * m(m-1)/2 term
-        always_ff @(posedge clk)
-            lane_phi[m] <= blk_phi + W'(m) * blk_f + W'(TRI_M) * K;
+    always_ff @(posedge clk) begin
+        phi_a       <= blk_phi;
+        t1_a        <= blk_f;
+        t2_a        <= (blk_f << 1) + K;
+        t3_a        <= blk_h;
+        lane_phi[0] <= phi_a;
+        lane_phi[1] <= phi_a + t1_a;
+        lane_phi[2] <= phi_a + t2_a;
+        lane_phi[3] <= phi_a + t3_a;
     end
 
     // -------------------------------------------- sin/cos lookup per lane

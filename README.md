@@ -52,7 +52,8 @@ ila_capture out/chirp.csv
 
 ## View the chirp
 
-The ILA contains the full 128-bit stream, pulse gate, TVALID/TREADY and eight
+The ILA samples registered copies of the stream (one DAC clock after the RFDC
+input), so its probes never load the RFDC-facing flops. It contains the full 128-bit stream, pulse gate, TVALID/TREADY and eight
 16-bit I/Q lane probes. View lanes as **Signed Decimal / Analog** in Vivado.
 To reconstruct all four samples per clock and plot the chirp correctly:
 

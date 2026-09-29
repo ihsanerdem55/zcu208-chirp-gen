@@ -50,7 +50,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_block_design_monitor_nets(self):
         lanes, rows = self.fixture()
-        rows[0][1:] = ["chirp_bd_i/chirp_gen_0_mon_data[127:0]", "chirp_bd_i/chirp_gen_0_trig_out",
+        rows[0][1:] = ["chirp_bd_i/chirp_gen_0_mon_data[127:0]", "chirp_bd_i/chirp_gen_0_mon_gate",
                        "chirp_bd_i/chirp_gen_0_mon_valid", "chirp_bd_i/chirp_gen_0_mon_ready"]
         rows[0].append("chirp_bd_i/iq_slice_0_Dout[15:0]")
         rows[1].append("HEX")

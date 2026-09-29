@@ -52,19 +52,26 @@ module chirp_gen_wrapper #(
     input  wire                  m_axis_tready,
     output wire                  trig_out,
 
-    // ILA monitor copies of the stream. In a block design, wiring a net to a pin
-    // of the connected m_axis interface removes that pin from the interface, so
-    // the ILA taps these plain ports instead.
+    // ILA monitor copies of the stream and pulse gate, one DAC clock later.
+    // In a block design, wiring a net to a pin of the connected m_axis
+    // interface removes that pin from the interface, so the ILA taps these
+    // plain ports. The extra register lets the RFDC-facing output flops sit
+    // next to the RFDC while the ILA's copies sit next to the ILA.
     (* X_INTERFACE_IGNORE = "true" *)
-    output wire [LANES*32-1:0]   mon_data,
+    output reg  [LANES*32-1:0]   mon_data,
     (* X_INTERFACE_IGNORE = "true" *)
-    output wire                  mon_valid,
+    output reg                   mon_valid,
     (* X_INTERFACE_IGNORE = "true" *)
-    output wire                  mon_ready
+    output reg                   mon_ready,
+    (* X_INTERFACE_IGNORE = "true" *)
+    output reg                   mon_gate
 );
-    assign mon_data  = m_axis_tdata;
-    assign mon_valid = m_axis_tvalid;
-    assign mon_ready = m_axis_tready;
+    always @(posedge dac_clk) begin
+        mon_data  <= m_axis_tdata;
+        mon_valid <= m_axis_tvalid;
+        mon_ready <= m_axis_tready;
+        mon_gate  <= trig_out;
+    end
 
     chirp_gen_top #(
         .LANES    (LANES),
