@@ -49,9 +49,8 @@ create_bd_design $bd_name
 
 # --- RF Data Converter -------------------------------------------------------
 # Tile 228/channel 0 with its local PLL and a 245.76 MHz CLK104 reference,
-# without tile forwarding. This assumes the reference reaches the tile 228
-# clock input; AMD's ZCU208 examples also source DAC clocks from tile 230.
-# Confirm on the board: rfdc_status must report state 15 and PLL locked 1.
+# without tile forwarding. Matches a DAC-228 sine design that ran on the
+# target board (clock source Tile228, distribution off, 245.76 MHz reference).
 # Units follow the IP: sampling rate in GSPS, NCO in GHz, clocks in MHz.
 set rfdc [create_bd_cell -type ip -vlnv xilinx.com:ip:usp_rf_data_converter rfdc]
 set rfdc_cfg [list \
