@@ -131,11 +131,18 @@ you power RF.
 
 ## 5. Program the CLK104 reference
 
-Using BoardUI / System Controller, load a CLK104 profile in which the
-LMK04828 output **DCLKout6 is enabled at 245.76 MHz**. Check that output's
-frequency and enable state, not just the profile's file name.
+The chirp design has no processor, so nothing programs the CLK104 after
+power-up. Without it, DAC tile 228 stops at state 6. Use one of:
 
-If you can, do this before step 6. If the clock is programmed after the
+- **Vitis (recommended):** run the small bare-metal program in
+  [`sw/clk104_init`](../sw/clk104_init/README.md). It writes AMD's 245.76 MHz
+  LMK04828 configuration over the PS I2C1 bus and works whichever bitstream is
+  loaded. The README covers the one-time Vitis setup.
+- **BoardUI / System Controller:** load a CLK104 profile with the 245.76 MHz
+  DAC reference enabled. Check the output's frequency and enable state, not
+  just the profile's name.
+
+The CLK104 keeps its setting until power-off. If you program it after the
 bitstream, run `rfdc_restart` in step 7.
 
 ## 6. Program the FPGA

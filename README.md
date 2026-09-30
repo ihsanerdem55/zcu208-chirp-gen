@@ -32,8 +32,10 @@ Generate Bitstream, then program matching `.bit` and `.ltx` files. The ILA is
 included by default. An implementation hook ties its debug hub to the independent
 100 MHz AXI clock; its sample clock remains in the DAC domain.
 
-Program CLK104 with a profile enabling **LMK DCLKout6 at 245.76 MHz** before
-starting the RFDC. These scripts do not program the clock card.
+Program the CLK104 for a **245.76 MHz DAC reference** after every power-up;
+the design itself has no processor to do it. Use the bare-metal Vitis program
+in [`sw/clk104_init`](sw/clk104_init/README.md), or a BoardUI profile. If you
+program it after the bitstream, run `rfdc_restart`.
 
 ```tcl
 source tcl/chirp_ctrl.tcl
