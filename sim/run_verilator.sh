@@ -6,7 +6,7 @@ mkdir -p out
 cp ../rtl/sincos_qw.mem .
 # Set VERILATOR=verilator-cli when using the Python wheel distribution.
 verilator_cmd=${VERILATOR:-verilator}
-for top in tb_chirp_gen tb_chirp_regs; do
+for top in tb_chirp_gen tb_chirp_regs tb_noise; do
     "$verilator_cmd" --binary --timing --output-split 0 -Wno-fatal -DDUMP_FILES \
         --top-module "$top" --Mdir "out/$top" "$top.sv" \
         ../rtl/*.sv ../rtl/chirp_gen_wrapper.v > "out/$top-build.log" 2>&1

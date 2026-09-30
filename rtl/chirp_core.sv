@@ -40,6 +40,7 @@ module chirp_core #(
     input  logic                     cw_mode,     // 1 = continuous tone at f_start, no pulsing
     input  logic                     iq_swap,     // 1 = swap I and Q (mirrors the spectrum)
     input  logic                     pack_ilv,    // 0 = {Q3..Q0,I3..I0}, 1 = {Q3,I3,..,Q0,I0}
+    input  logic                     noise_mode,  // 1 = band-limited noise instead of chirp/CW
     input  logic signed [31:0]       f_start,
     input  logic signed [31:0]       k_rate,
     input  logic        [31:0]       phase0,
@@ -165,6 +166,20 @@ module chirp_core #(
         );
     end
 
+    // ------------------------------------------- band-limited noise source
+    // Reuses the KRATE register (k_rate) as the noise bandwidth word (ninc).
+    // noise_src free-runs; the mux below selects it in place of the sin/cos
+    // lookup, so the amplitude, pulse gate, I/Q swap and packing stages are
+    // shared with the chirp path unchanged.
+    logic [LANES*16-1:0] noise_i, noise_q;
+    noise_src #(.LANES(LANES)) u_noise (
+        .clk     (clk),
+        .rst_n   (rst_n),
+        .ninc    (k_rate),
+        .noise_i (noise_i),
+        .noise_q (noise_q)
+    );
+
     // --------------------------------------------- amplitude scaling (DSP)
     logic signed [15:0] i_s [LANES];
     logic signed [15:0] q_s [LANES];
@@ -178,10 +193,19 @@ module chirp_core #(
         return p[30:15];
     endfunction
 
+    logic signed [15:0] src_i [LANES];
+    logic signed [15:0] src_q [LANES];
+    always_comb begin
+        for (int m = 0; m < LANES; m++) begin
+            src_i[m] = noise_mode ? $signed(noise_i[16*m +: 16]) : cos_l[m];
+            src_q[m] = noise_mode ? $signed(noise_q[16*m +: 16]) : sin_l[m];
+        end
+    end
+
     always_ff @(posedge clk) begin
         for (int m = 0; m < LANES; m++) begin
-            i_s[m] <= scale(cos_l[m], amp_s);
-            q_s[m] <= scale(sin_l[m], amp_s);
+            i_s[m] <= scale(src_i[m], amp_s);
+            q_s[m] <= scale(src_q[m], amp_s);
         end
     end
 

@@ -254,6 +254,46 @@ python scripts/plot_ila.py out/chirp.csv
 
 Raise `-amp` in steps only after the analog chain is known to be safe for it.
 
+## Band-limited noise
+
+`noise` is a separate signal mode for filling a chosen bandwidth with
+pseudo-random samples (receiver sensitivity/BER tests, noise-figure and
+calibration measurements, channel emulation). It uses the same DAC datapath as
+the chirp, so `nco_set` sets the RF centre and `-amp` the level; `gen_off` stops
+it; `cw`/`chirp` switch back.
+
+```tcl
+nco_set 500e6
+noise -bw 200e6 -amp 0.1                       ;# continuous, ~400..600 MHz
+# noise -bw 100e6 -amp 0.1 -pw 2e-6 -pri 10e-6 ;# pulsed noise, 2 us every 10 us
+```
+
+How it works: a fresh random complex value is drawn every `D = fs_bb/bw` samples
+and held in between (sample-and-hold), so the baseband band is about ±`bw`/2 wide
+with a sinc² envelope whose first nulls sit at ±`bw` and −13 dB shoulders beyond.
+Widen or narrow `-bw` to taste; the RFDC interpolation filter passes roughly
+±0.4·fs_bb (±295 MHz), so bandwidths up to ~590 MHz are usable.
+
+**Pass on the analyzer:** a raised noise floor spread across about `bw` around the
+centre (≈500 MHz), symmetric, dropping back to the floor outside it. Use
+**Trace → Average** to see the band shape. The amplitude is a digital fraction,
+not a calibrated power; raise `-amp` only once the analog chain is known safe.
+
+Capture and plot as for the chirp:
+
+```tcl
+ila_capture out/noise.csv immediate
+```
+
+```sh
+python scripts/plot_ila.py out/noise.csv
+```
+
+The bottom **Spectrum (dB)** panel of `out/noise.png` shows the band centred at
+0 (the NCO) with the sinc² shape; the instantaneous-frequency panel is noisy by
+nature and not meaningful here. The generator is deterministic (fixed seeds), so
+a capture repeats run to run.
+
 ## 10. Check recovery once
 
 With a tone running (`cw 10e6 0.1`):

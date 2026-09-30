@@ -9,6 +9,7 @@
 #     nco_set 500e6                             ;# RF centre frequency
 #     cw 10e6 0.1                               ;# tone at NCO + 10 MHz, 0.1 of full scale
 #     chirp -bw 400e6 -pw 2e-6 -pri 10e-6       ;# 400 MHz LFM, 2 us pulse, 100 kHz PRF
+#     noise -bw 200e6 -amp 0.1                  ;# band-limited noise, 200 MHz wide, continuous
 #     gen_off
 # =============================================================================
 
@@ -30,6 +31,8 @@ set ::RFDC_CONFIG_CHECK 1
 
 # register offsets (chirp_axil_regs.sv)
 array set ::R {ID 0x00 CTRL 0x04 FSTART 0x08 KRATE 0x0C PW 0x10 PRI 0x14 AMP 0x18 PHASE0 0x1C APPLY 0x20 STATUS 0x24}
+# CTRL bits:   [0] enable, [1] cw_mode, [2] iq_swap, [3] pack_ilv, [4] noise_mode
+# In noise_mode KRATE is reused as the noise bandwidth word (ninc, unsigned Q0.32).
 # STATUS bits: [0] handshake ready, [1] APPLY pending, [2] heartbeat, [3] DAC MMCM locked
 
 # ---- low-level AXI access -----------------------------------------------------
@@ -112,8 +115,9 @@ proc fword {f_hz} {    ;# signed 32-bit frequency word at the baseband rate
     return [expr {$w & 0xFFFFFFFF}]
 }
 
-proc ctrl_word {enable cw swap ilv} {
-    return [expr {($enable ? 1 : 0) | ($cw ? 2 : 0) | ($swap ? 4 : 0) | ($ilv ? 8 : 0)}]
+proc ctrl_word {enable cw swap ilv {noise 0}} {
+    return [expr {($enable ? 1 : 0) | ($cw ? 2 : 0) | ($swap ? 4 : 0) | \
+                  ($ilv ? 8 : 0) | ($noise ? 16 : 0)}]
 }
 
 # packing / swap options, kept between calls (set once during bring-up)
@@ -191,6 +195,62 @@ proc chirp {args} {
     puts [format "LFM %.3f MHz in %.3f us (slope %.4f MHz/us), PRI %.3f us, NCO %+.1f..%+.1f MHz" \
         [expr {$slope * $ns / $::FS_BB / 1e6}] [expr {$pw_clk / $::FCLK * 1e6}] \
         [expr {$slope / 1e12}] [expr {$pri_clk / $::FCLK * 1e6}] [expr {$f0/1e6}] [expr {$f1/1e6}]]
+}
+
+# Band-limited noise, centred at the RFDC NCO. The generator draws a fresh random
+# complex sample every D = FS_BB/bw samples and holds it in between (sample-and-hold),
+# so the baseband band is roughly +-bw/2 with a sinc^2 envelope (first nulls at
+# +-bw). Set the NCO with nco_set for the RF centre; trim bw against the analyzer.
+#   noise -bw 200e6 ?-amp 0.5? ?-pw 0? ?-pri 10e-6?
+# -pw 0 (default) is continuous noise; -pw > 0 makes pulsed noise (PW/PRI seconds).
+proc noise {args} {
+    array set o {-bw 100e6 -amp 0.5 -pw 0 -pri 10e-6}
+    if {[llength $args] % 2} { error "noise needs option/value pairs" }
+    foreach {key val} $args {
+        if {![info exists o($key)]} { error "Unknown noise option: $key" }
+        if {![string is double -strict $val] || ![expr {abs($val) < Inf}]} {
+            error "$key must be finite and numeric"
+        }
+        set o($key) $val
+    }
+    if {$o(-bw) <= 0} { error "bandwidth must be > 0" }
+    set a [amplitude_word $o(-amp)]
+    # ninc = round(2^32 * bw / FS_BB) (Q0.32 new-draw fraction per sample), >= 1
+    set ninc [expr {wide(round(pow(2,32) * double($o(-bw)) / $::FS_BB))}]
+    if {$ninc < 1}            { set ninc 1 }
+    if {$ninc > 0xFFFFFFFF}   { set ninc 0xFFFFFFFF }
+    if {$o(-bw) > 0.8 * $::FS_BB} {
+        puts "WARNING: bw beyond +-[expr {0.4*$::FS_BB/1e6}] MHz; the DAC interpolation filter will roll it off"
+    }
+    set cont [expr {$o(-pw) <= 0}]
+    if {$cont} {
+        set pw_clk 0
+        set pri_clk 1
+    } else {
+        set pw_clk  [expr {wide(round($o(-pw)  * $::FCLK))}]
+        set pri_clk [expr {wide(round($o(-pri) * $::FCLK))}]
+        if {$pw_clk < 1 || $pri_clk < $pw_clk || $pri_clk > 0xFFFFFFFF} {
+            error "need 1 <= PW <= PRI (in clocks: PW=$pw_clk PRI=$pri_clk)"
+        }
+    }
+    rfdc_require_running
+    chirp_prepare
+    creg_wr FSTART 0
+    creg_wr KRATE  [expr {$ninc & 0xFFFFFFFF}]
+    creg_wr PW     $pw_clk
+    creg_wr PRI    $pri_clk
+    creg_wr AMP    $a
+    creg_wr PHASE0 0
+    creg_wr CTRL   [ctrl_word 1 $cont $::IQ_SWAP $::PACK_ILV 1]
+    chirp_apply
+    set d [expr {double($::FS_BB) / (double($ninc) / pow(2,32) * $::FS_BB)}]
+    if {$cont} {
+        puts [format "noise: bw %.3f MHz (hold D=%.1f samples), amplitude %.3f, continuous" \
+            [expr {$o(-bw)/1e6}] $d $o(-amp)]
+    } else {
+        puts [format "noise: bw %.3f MHz (hold D=%.1f samples), amplitude %.3f, pulsed PW %.3f us PRI %.3f us" \
+            [expr {$o(-bw)/1e6}] $d $o(-amp) [expr {$pw_clk/$::FCLK*1e6}] [expr {$pri_clk/$::FCLK*1e6}]]
+    }
 }
 
 proc gen_off {} {

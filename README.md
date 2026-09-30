@@ -47,10 +47,29 @@ clock_check                 ;# changing DAC fabric heartbeat
 nco_set 500e6
 cw 10e6 0.1                 ;# first check: ~510 MHz tone at low amplitude
 chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -amp 0.1
+noise -bw 200e6 -amp 0.1   ;# band-limited noise, ~400..600 MHz, continuous
 source tcl/ila_capture.tcl
 ila_capture out/chirp.csv
 # gen_off
 ```
+
+### Band-limited noise
+
+`noise` fills a chosen bandwidth around the NCO with pseudo-random samples
+(sample-and-hold, so the band has a sinc² envelope; set the NCO for the RF
+centre and trim `-bw` against the analyzer):
+
+```tcl
+nco_set 500e6
+noise -bw 200e6 -amp 0.1                 ;# continuous, ~400..600 MHz
+noise -bw 100e6 -amp 0.1 -pw 2e-6 -pri 10e-6   ;# pulsed noise, 2 us every 10 us
+ila_capture out/noise.csv immediate      ;# then plot_ila shows the spectrum panel
+```
+
+It reuses the DAC datapath (amplitude, pulse gate, I/Q swap, packing) and the
+`KRATE` register as the bandwidth word, so no bitstream change is needed beyond
+building this branch. The noise is zero-mean and never clips (about −17 dBFS RMS,
+−6 dBFS peaks at full `-amp`). See the [noise notes](docs/bringup.md#band-limited-noise).
 
 ## View the chirp
 

@@ -137,6 +137,27 @@ chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -amp 0.1
 # Yuvarlanmış süreler: PW 369 clock (~2.002 us), PRI 1843 clock (~9.999 us)
 ```
 
+### Band sınırlı gürültü
+
+`noise` komutu, seçilen bant genişliğini sözde-rastgele örneklerle doldurur
+(alıcı hassasiyeti/BER testi, gürültü figürü ve kalibrasyon ölçümleri). Aynı DAC
+yolunu kullanır: merkez frekansı `nco_set`, seviyeyi `-amp` belirler, `gen_off`
+durdurur.
+
+```tcl
+nco_set 500e6
+noise -bw 200e6 -amp 0.1                       ;# sürekli, ~400..600 MHz
+# noise -bw 100e6 -amp 0.1 -pw 2e-6 -pri 10e-6 ;# darbeli gürültü
+```
+
+Her `D = fs_bb/bw` örnekte yeni bir rastgele değer çekilip aradaki örneklerde
+tutulur (örnekle-tut), bu yüzden band ~±`bw`/2 genişliğinde ve sinc² zarflıdır
+(ilk sıfırlar ±`bw`). RFDC interpolasyon filtresi yaklaşık ±0.4·fs_bb (±295 MHz)
+geçirir. Analizörde `Average` ile merkez (~500 MHz) etrafında yükselen bir gürültü
+tabanı görülür. `plot_ila.py` çıktısının en alttaki **Spectrum (dB)** paneli bandı
+ve şeklini gösterir; anlık frekans paneli gürültüde anlamsızdır. Üreteç sabit
+tohumlarla çalışır, yani yakalama tekrarlanabilir.
+
 ## 3. ILA'da grafik
 
 ```tcl

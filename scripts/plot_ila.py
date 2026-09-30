@@ -104,7 +104,7 @@ def plot(samples, gates, output, fs_bb, title):
     active = gate & (np.abs(z) > 0)
     frequency = np.angle(z[1:] * np.conj(z[:-1])) * fs_bb / (2 * np.pi * 1e6)
     frequency[~(active[1:] & active[:-1])] = np.nan
-    fig, axes = plt.subplots(3, 1, figsize=(11, 9))
+    fig, axes = plt.subplots(4, 1, figsize=(11, 11))
     axes[0].plot(t, iq[:, 0], lw=0.6, label="I")
     axes[0].plot(t, iq[:, 1], lw=0.6, alpha=0.7, label="Q")
     axes[0].set_ylabel("Signed sample")
@@ -115,6 +115,23 @@ def plot(samples, gates, output, fs_bb, title):
     axes[2].plot(t[1:], frequency, lw=0.8)
     axes[2].set_ylabel("Baseband frequency (MHz)")
     axes[2].set_xlabel("Time in capture (us)")
+    # Power spectrum of the active samples: shows the chirp band or the noise
+    # band and its shape, relative to the RFDC NCO centre (0 MHz here).
+    zc = z[active]
+    if zc.size >= 16:
+        zc = zc - zc.mean()
+        window = np.hanning(zc.size)
+        spectrum = np.fft.fftshift(np.fft.fft(zc * window))
+        faxis = np.fft.fftshift(np.fft.fftfreq(zc.size, d=1.0 / fs_bb)) / 1e6
+        psd = 20 * np.log10(np.abs(spectrum) + 1e-9)
+        psd -= psd.max()
+        axes[3].plot(faxis, psd, lw=0.7)
+        axes[3].set_ylim(-80, 5)
+    else:
+        axes[3].text(0.5, 0.5, "not enough active samples for a spectrum",
+                     ha="center", va="center", transform=axes[3].transAxes)
+    axes[3].set_ylabel("Spectrum (dB)")
+    axes[3].set_xlabel("Baseband frequency relative to NCO (MHz)")
     for ax in axes:
         ax.grid(alpha=0.25)
     fig.suptitle(title + "\nDigital I/Q before RFDC interpolation and NCO")

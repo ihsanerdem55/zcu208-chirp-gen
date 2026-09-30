@@ -3,9 +3,11 @@
 //
 // Register map (byte offsets from the slave base address):
 //   0x00 ID      RO  0x43485250 ("CHRP")
-//   0x04 CTRL    RW  [0] enable  [1] cw_mode  [2] iq_swap  [3] pack_ilv
+//   0x04 CTRL    RW  [0] enable  [1] cw_mode  [2] iq_swap  [3] pack_ilv  [4] noise_mode
 //   0x08 FSTART  RW  signed start frequency word  (f = FSTART * fs_bb / 2^32)
 //   0x0C KRATE   RW  signed chirp rate, Q24.8      (slope = KRATE/256 * fs_bb^2 / 2^32)
+//                    In noise_mode this word is reused as the noise bandwidth,
+//                    ninc = round(2^32 * bw / fs_bb) (unsigned Q0.32).
 //   0x10 PW      RW  pulse width, fabric clocks
 //   0x14 PRI     RW  pulse repetition interval, fabric clocks (>= 1)
 //   0x18 AMP     RW  [15:0] amplitude, Q1.15 (0x7FFF = full scale)
@@ -62,6 +64,7 @@ module chirp_axil_regs #(
     output logic               cw_mode,
     output logic               iq_swap,
     output logic               pack_ilv,
+    output logic               noise_mode,
     output logic signed [31:0] f_start,
     output logic signed [31:0] k_rate,
     output logic        [31:0] pw,
@@ -193,6 +196,7 @@ module chirp_axil_regs #(
             cw_mode     <= 1'b0;
             iq_swap     <= 1'b0;
             pack_ilv    <= 1'b1;
+            noise_mode  <= 1'b0;
             f_start     <= '0;
             k_rate      <= '0;
             pw          <= 32'd100;
@@ -215,6 +219,7 @@ module chirp_axil_regs #(
                 cw_mode     <= r_ctrl[1];
                 iq_swap     <= r_ctrl[2];
                 pack_ilv    <= r_ctrl[3];
+                noise_mode  <= r_ctrl[4];
                 f_start     <= r_fstart;
                 k_rate      <= r_krate;
                 pw          <= r_pw;

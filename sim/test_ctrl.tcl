@@ -66,6 +66,25 @@ set writes {}
 chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -phase_deg 270
 assert {$control == 9} "chirp must send interleaved IQ"
 assert {[lsearch -exact $writes {PHASE0 3221225472}] >= 0} "unsigned phase word"
+
+# ---- band-limited noise ----
+set writes {}
+noise -bw 200e6 -amp 0.1
+assert {$control == 27} "continuous noise sets noise+cw+ilv+enable (0x1B)"
+assert {[lindex $writes 0] eq {CTRL 8}} "old stream disabled before noise"
+set ninc [expr {wide(round(pow(2,32) * 200e6 / $::FS_BB)) & 0xFFFFFFFF}]
+assert {[lsearch -exact $writes [list KRATE $ninc]] >= 0} "noise bandwidth word goes to KRATE"
+assert {[lsearch -exact $writes {FSTART 0}] >= 0} "noise clears the start frequency"
+set writes {}
+noise -bw 100e6 -pw 2e-6 -pri 10e-6 -amp 0.2
+assert {$control == 25} "pulsed noise clears the cw (continuous) bit (0x19)"
+assert {[lsearch -exact $writes [list PW [expr {wide(round(2e-6*$::FCLK))}]]] >= 0} "pulsed noise PW in clocks"
+assert {[lsearch -exact $writes [list PRI [expr {wide(round(10e-6*$::FCLK))}]]] >= 0} "pulsed noise PRI in clocks"
+foreach command {{noise -bw 0} {noise -unknown 3} {noise -bw 100e6 -pw 10e-6 -pri 1e-6} {noise -bw Inf}} {
+    rejects_without_writes $command
+}
+puts "PASS: noise sets bandwidth word/mode, pulsing, and rejects bad options"
+
 foreach command {{cw 10e6 -0.1} {cw 400e6} {chirp -amp 1.1} {chirp -unknown 3}
                  {chirp -pw 0} {chirp -pw 10e-6 -pri 1e-6} {chirp -pri 100}
                  {chirp -offset 300e6 -bw 200e6} {chirp -pw Inf} {nco_set Inf}} {

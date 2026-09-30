@@ -28,6 +28,7 @@ puts "INFO: using board part $bp"
 
 add_files -norecurse [list \
     $repo_dir/rtl/sincos_qw_rom.sv \
+    $repo_dir/rtl/noise_src.sv \
     $repo_dir/rtl/chirp_core.sv \
     $repo_dir/rtl/chirp_axil_regs.sv \
     $repo_dir/rtl/chirp_gen_top.sv \
