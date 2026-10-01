@@ -242,6 +242,9 @@ validate_bd_design
 set stream [get_bd_intf_pins rfdc/s00_axis]
 set nb [get_property CONFIG.TDATA_NUM_BYTES $stream]
 if {$nb != 32} { error "RFDC stream must be 256 bits (8 I/Q samples), got $nb bytes" }
+# The generator declares its own width (chirp_gen_wrapper.v X_INTERFACE_PARAMETER).
+set gb [get_property CONFIG.TDATA_NUM_BYTES [get_bd_intf_pins chirp_gen_0/m_axis]]
+if {$gb != $nb} { error "chirp_gen_0/m_axis declares $gb bytes, RFDC expects $nb" }
 set fabric [get_property CONFIG.DAC0_Fabric_Freq $rfdc]
 if {abs($fabric - 184.32) > 0.001} { error "RFDC requires $fabric MHz, expected 184.32 MHz" }
 # The generator must drive the RFDC through the interface connection.

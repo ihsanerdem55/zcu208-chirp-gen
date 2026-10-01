@@ -58,9 +58,10 @@ The script creates `vivado/zcu208_chirp`, builds the block design and stops
 with an error if anything required is missing. That includes a broken
 chirp→RFDC stream connection or wrong ILA probe widths. The Messages window
 must not show [BD 41-1271] (pin detached from an interface), [BD 41-759]
-(inputs tied to 0) or [BD 41-2383] (width mismatch). [BD 41-926] about
-`TDATA_NUM_BYTES = 32` on `chirp_gen_0/m_axis` can appear and is harmless:
-both ends agree on 32 bytes. Then open the **rfdc** block
+(inputs tied to 0) or [BD 41-2383] (width mismatch). The generator declares
+its 32-byte stream itself, so [BD 41-926] (`TDATA_NUM_BYTES` copied from the
+RFDC) no longer appears; the script stops if the two widths differ. Then open
+the **rfdc** block
 once, confirm these settings, and close it with **Cancel** so nothing changes:
 
 | Setting | Expected |
@@ -122,6 +123,23 @@ report_drc            -file out/drc.rpt
 
 Investigate any other unsafe crossing or unconstrained internal path before
 you power RF.
+
+**Expected warnings.** A build that meets timing still shows these. They need
+no action:
+
+| Message | Where it comes from | Why it is expected |
+|---|---|---|
+| [IP_Flow 19-4994] Overwriting existing constraint file `…ila_dac_0_ooc.xdc` | ILA IP | The ILA's output products were regenerated over an earlier build in the same folder. |
+| [IP_Flow 19-4995] IP cache path is more than 80 characters | Vivado | The project path is long. Move the repository to a short folder (for example `C:\z208`) to stay clear of Windows' 260-character path limit. |
+| [Synth 8-7071], [Synth 8-7023] on `axi_sc` (`M00_AXI_awprot` …) | Block design | The generator's AXI-Lite slave has no PROT signals; the SmartConnect leaves those ports open. |
+| [Synth 8-4446] all outputs are unconnected for this instance (`chirp_bd.v`) | Block design | `ila_dac` is the only cell with no used outputs (its trigger outputs are optional); open `chirp_bd.v` at the reported line to confirm. The ILA is kept. |
+| [Synth 8-7129] Port `Din[…]` in `xlslice` has no load | Block design | Each `iq_slice_n` takes the 256-bit stream and uses 16 bits of it. |
+| [Synth 8-3936] Found unconnected internal register … trimmed | Generator RTL | Synthesis drops register bits nothing reads, for example AXI address bits above 0x3C, product bits outside the rounded 16-bit result and lane-phase bits below the 14 ROM address bits. |
+| [Synth 8-589], [Synth 8-7071], [Synth 8-7023], [Synth 8-3848], [Synth 8-3332] inside `chirp_bd_rfdc_0` or `chirp_bd_axi_sc_0` | AMD IP | Inside the RFDC and SmartConnect IP; not editable. |
+| [Vivado_Tcl 4-921] Waiver ID 'CDC-10' -to list should not be empty (`ila_impl.xdc`) | ILA IP | The ILA's own constraints waive a crossing that this ILA configuration does not have. |
+| [Timing 38-164] multiple clocks, [Timing 38-127] no common period | Vivado | The AXI and DAC clocks are unrelated; every crossing between them is constrained in `chirp_timing.xdc`. Do not add `set_clock_groups` to silence it: that would override the bound on the parameter bus. |
+| [Timing 38-436] There are set_bus_skew constraint(s) | Vivado | A reminder that bus skew is reported separately: check `impl_1/timing_bus_skew.rpt`. |
+| [Power 33-332] high-fanout reset nets asserted for excessive periods | Power estimate | The vectorless power estimate assumes reset nets toggle; it affects only the power figure. |
 
 ## 4. Set up the board (power off)
 

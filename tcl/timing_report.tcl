@@ -36,9 +36,10 @@ proc tr_write {} {
     catch {report_bus_skew -file [file join $tr_dir timing_bus_skew.rpt]}
     catch {report_cdc -details -file [file join $tr_dir timing_cdc.rpt]}
 
-    set tr_paths [get_timing_paths -setup -max_paths 40 -nworst 1 -unique_pins -sort_by slack]
-    set tr_hold  [lindex [get_timing_paths -hold -max_paths 1 -nworst 1] 0]
-    set tr_nfail [llength [get_timing_paths -setup -max_paths 1000 -nworst 1 -unique_pins -slack_lesser_than 0]]
+    # -quiet: an empty result (e.g. no failing paths) is not worth a warning
+    set tr_paths [get_timing_paths -quiet -setup -max_paths 40 -nworst 1 -unique_pins -sort_by slack]
+    set tr_hold  [lindex [get_timing_paths -quiet -hold -max_paths 1 -nworst 1] 0]
+    set tr_nfail [llength [get_timing_paths -quiet -setup -max_paths 1000 -nworst 1 -unique_pins -slack_lesser_than 0]]
     set tr_fd [open [file join $tr_dir timing_failing.txt] w]
     puts $tr_fd "WNS [tr_prop [lindex $tr_paths 0] SLACK] ns, WHS [tr_prop $tr_hold SLACK] ns, failing setup endpoints: $tr_nfail"
     puts $tr_fd [format "%-8s %-4s %-7s %-7s %-34s %s" slack lvls logic route "clocks (start -> end)" "startpoint -> endpoint"]
