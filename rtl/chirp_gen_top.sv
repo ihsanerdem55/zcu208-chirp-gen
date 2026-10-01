@@ -2,7 +2,7 @@
 // chirp_gen_top.sv  --  AXI-Lite registers + chirp core
 // -----------------------------------------------------------------------------
 module chirp_gen_top #(
-    parameter int    LANES    = 4,
+    parameter int    LANES    = 8,
     parameter int    ADDR_W   = 16,
     parameter        MEM_FILE = "sincos_qw.mem"
 ) (

@@ -5,7 +5,7 @@
 // The X_INTERFACE attributes make Vivado infer s_axi / m_axis bus interfaces.
 // -----------------------------------------------------------------------------
 module chirp_gen_wrapper #(
-    parameter LANES  = 4,
+    parameter LANES  = 8,
     parameter ADDR_W = 16
 ) (
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)

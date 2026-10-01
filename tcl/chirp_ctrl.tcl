@@ -11,14 +11,18 @@
 #     chirp -bw 400e6 -pw 2e-6 -pri 10e-6       ;# 400 MHz LFM, 2 us pulse, 100 kHz PRF
 #     noise -bw 200e6 -amp 0.1                  ;# band-limited noise, 200 MHz wide, continuous
 #     gen_off
+#
+# 4x interpolation: 1474.56 MSPS complex at the RFDC input, so chirps and noise
+# can use about +-0.4 * 1474.56 = +-590 MHz around the NCO (~1.18 GHz).
 # =============================================================================
 
 # ---- design constants (must match the RFDC settings) ------------------------
 set ::FS_DAC     5898.24e6          ;# RF-DAC sample rate
-set ::INTERP     8
-set ::LANES      4
-set ::FS_BB      [expr {$::FS_DAC / $::INTERP}]     ;# 737.28 MSPS complex
+set ::INTERP     4
+set ::LANES      8                  ;# complex samples per fabric clock (256-bit AXIS)
+set ::FS_BB      [expr {$::FS_DAC / $::INTERP}]     ;# 1474.56 MSPS complex
 set ::FCLK       [expr {$::FS_BB / $::LANES}]       ;# 184.32 MHz fabric clock
+set ::NCO_HZ     500e6              ;# DAC_NCO_Freq00 in tcl/build_bd.tcl; nco_set updates it
 
 set ::CHIRP_BASE 0x40000000
 set ::RFDC_BASE  0x40040000
@@ -32,7 +36,8 @@ set ::RFDC_CONFIG_CHECK 1
 # register offsets (chirp_axil_regs.sv)
 array set ::R {ID 0x00 CTRL 0x04 FSTART 0x08 KRATE 0x0C PW 0x10 PRI 0x14 AMP 0x18 PHASE0 0x1C APPLY 0x20 STATUS 0x24}
 # CTRL bits:   [0] enable, [1] cw_mode, [2] iq_swap, [3] pack_ilv, [4] noise_mode
-# In noise_mode KRATE is reused as the noise bandwidth word (ninc, unsigned Q0.32).
+# In noise_mode KRATE is reused as the noise bandwidth word (ninc, unsigned Q0.32)
+# and PHASE0 as the noise seed.
 # STATUS bits: [0] handshake ready, [1] APPLY pending, [2] heartbeat, [3] DAC MMCM locked
 
 # ---- low-level AXI access -----------------------------------------------------
@@ -129,6 +134,17 @@ proc iq_options {swap ilv} {
     set ::IQ_SWAP $swap; set ::PACK_ILV $ilv
     puts "IQ_SWAP=$swap PACK_ILV=$ilv"
 }
+# Warn when the RF band NCO + [f_lo, f_hi] leaves the first Nyquist zone: below
+# 0 Hz it folds back onto itself, above FS_DAC/2 it lands in the second zone.
+proc band_check {f_lo f_hi} {
+    set lo [expr {$::NCO_HZ + min($f_lo, $f_hi)}]
+    set hi [expr {$::NCO_HZ + max($f_lo, $f_hi)}]
+    if {$lo < 0 || $hi > $::FS_DAC / 2.0} {
+        puts [format "WARNING: RF band %.1f..%.1f MHz (NCO %.1f MHz) leaves 0..%.1f MHz; raise/lower the NCO" \
+            [expr {$lo/1e6}] [expr {$hi/1e6}] [expr {$::NCO_HZ/1e6}] [expr {$::FS_DAC/2e6}]]
+    }
+}
+
 proc amplitude_word {amp} {
     if {![string is double -strict $amp] || !($amp >= 0 && $amp <= 1)} {
         error "amplitude must be between 0 and 1"
@@ -141,6 +157,7 @@ proc amplitude_word {amp} {
 proc cw {f_off {amp 0.5}} {
     set f0 [fword $f_off]
     set a [amplitude_word $amp]
+    band_check $f_off $f_off
     rfdc_require_running
     chirp_prepare
     creg_wr FSTART $f0
@@ -180,6 +197,7 @@ proc chirp {args} {
     if {$k >= 2147483648 || $k < -2147483648} { error "slope too steep for KRATE (Q24.8)" }
     set fw [fword $f0]
     fword $f1
+    band_check $f0 $f1
     set phase [expr {wide(round(fmod($o(-phase_deg), 360.0) / 360.0 * 4294967296.0)) & 0xFFFFFFFF}]
     rfdc_require_running
     chirp_prepare
@@ -201,10 +219,12 @@ proc chirp {args} {
 # complex sample every D = FS_BB/bw samples and holds it in between (sample-and-hold),
 # so the baseband band is roughly +-bw/2 with a sinc^2 envelope (first nulls at
 # +-bw). Set the NCO with nco_set for the RF centre; trim bw against the analyzer.
-#   noise -bw 200e6 ?-amp 0.5? ?-pw 0? ?-pri 10e-6?
+#   noise -bw 200e6 ?-amp 0.5? ?-pw 0? ?-pri 10e-6? ?-seed 0?
 # -pw 0 (default) is continuous noise; -pw > 0 makes pulsed noise (PW/PRI seconds).
+# Every noise command restarts the same pseudo-random sequence; -seed (0..2^32-1,
+# written to PHASE0) selects another realisation, e.g. uncorrelated noise per run.
 proc noise {args} {
-    array set o {-bw 100e6 -amp 0.5 -pw 0 -pri 10e-6}
+    array set o {-bw 100e6 -amp 0.5 -pw 0 -pri 10e-6 -seed 0}
     if {[llength $args] % 2} { error "noise needs option/value pairs" }
     foreach {key val} $args {
         if {![info exists o($key)]} { error "Unknown noise option: $key" }
@@ -212,6 +232,9 @@ proc noise {args} {
             error "$key must be finite and numeric"
         }
         set o($key) $val
+    }
+    if {![string is wide -strict $o(-seed)] || $o(-seed) < 0 || $o(-seed) > 0xFFFFFFFF} {
+        error "-seed must be an integer 0..4294967295"
     }
     if {$o(-bw) <= 0} { error "bandwidth must be > 0" }
     set a [amplitude_word $o(-amp)]
@@ -222,6 +245,7 @@ proc noise {args} {
     if {$o(-bw) > 0.8 * $::FS_BB} {
         puts "WARNING: bw beyond +-[expr {0.4*$::FS_BB/1e6}] MHz; the DAC interpolation filter will roll it off"
     }
+    band_check [expr {-$o(-bw) / 2.0}] [expr {$o(-bw) / 2.0}]
     set cont [expr {$o(-pw) <= 0}]
     if {$cont} {
         set pw_clk 0
@@ -240,7 +264,7 @@ proc noise {args} {
     creg_wr PW     $pw_clk
     creg_wr PRI    $pri_clk
     creg_wr AMP    $a
-    creg_wr PHASE0 0
+    creg_wr PHASE0 [expr {wide($o(-seed))}]
     creg_wr CTRL   [ctrl_word 1 $cont $::IQ_SWAP $::PACK_ILV 1]
     chirp_apply
     set d [expr {double($::FS_BB) / (double($ninc) / pow(2,32) * $::FS_BB)}]
@@ -317,8 +341,9 @@ proc rfdc_status {} {
         [expr {($cs >> 3) & 1}] [expr {$cs & 1}] [expr {($cs >> 1) & 1}]]
     if {$state == 15} {
         set cfg [rfdc_config]
-        puts [format "DAC ch%d: interpolation %dx, I/Q input %d, datapath mode %d, fabric words %d" \
-            $::DAC_BLOCK [dict get $cfg interp] [dict get $cfg iq] [dict get $cfg datapath] [dict get $cfg words]]
+        puts [format "DAC ch%d: interpolation %dx, I/Q input %d, datapath mode %d, fabric words %d (expected %d)" \
+            $::DAC_BLOCK [dict get $cfg interp] [dict get $cfg iq] [dict get $cfg datapath] [dict get $cfg words] \
+            [expr {2 * $::LANES}]]
         foreach e [rfdc_config_errors $cfg] { puts "ERROR: RFDC $e" }
     } else {
         puts "Check CLK104 LMK DCLKout6 = 245.76 MHz to tile 228; use rfdc_restart after programming the clock."
@@ -401,6 +426,7 @@ proc nco_set {f_hz} {
     wr32 [expr {$b + 0x8C}] [expr {$u & ~0x7}]
     set d [rd32 [expr {$b + 0x20}]]                          ;# trigger NCO update event
     wr32 [expr {$b + 0x20}] [expr {($d & ~0xF) | 0x2}]
+    set ::NCO_HZ $f
     puts [format "NCO = %.6f MHz" [expr {$f_hz / 1e6}]]
 }
 

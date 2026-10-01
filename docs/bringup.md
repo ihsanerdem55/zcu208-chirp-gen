@@ -9,8 +9,9 @@ The design has passed RTL simulation only. No bitstream from it has yet been
 run on a board, so treat each step as a test and record what you see.
 
 What the design does: DAC tile 228 / channel 0, 245.76 MHz CLK104 reference,
-on-tile PLL, 5.89824 GSPS, 8x interpolation, fine-mixer NCO. Samples go in at
-737.28 MSPS complex (four samples per 184.32 MHz fabric clock). Control is
+on-tile PLL, 5.89824 GSPS, 4x interpolation, fine-mixer NCO. Samples go in at
+1474.56 MSPS complex (eight samples per 184.32 MHz fabric clock, 256 bits), so
+a chirp or noise band can be up to ~1.18 GHz wide around the NCO. Control is
 over JTAG-to-AXI from the Vivado Tcl console; no Vitis or PetaLinux is needed.
 
 ## 0. What you need
@@ -42,7 +43,7 @@ bash sim/run_iverilog.sh
 
 **Pass:** the script runs to the end, which it only does if every stage passed,
 and prints `OK` last. Along the way you should see `*** TEST PASSED ***` with
-`0 mismatches` and `SUMMARY: 10/10 checks passed`.
+`0 mismatches`, `*** NOISE TEST PASSED ***` and `SUMMARY: 14/14 checks passed`.
 
 ## 2. Build the bitstream
 
@@ -58,8 +59,8 @@ with an error if anything required is missing. That includes a broken
 chirp→RFDC stream connection or wrong ILA probe widths. The Messages window
 must not show [BD 41-1271] (pin detached from an interface), [BD 41-759]
 (inputs tied to 0) or [BD 41-2383] (width mismatch). [BD 41-926] about
-`TDATA_NUM_BYTES = 16` on `chirp_gen_0/m_axis` can appear and is harmless:
-both ends agree on 16 bytes. Then open the **rfdc** block
+`TDATA_NUM_BYTES = 32` on `chirp_gen_0/m_axis` can appear and is harmless:
+both ends agree on 32 bytes. Then open the **rfdc** block
 once, confirm these settings, and close it with **Cancel** so nothing changes:
 
 | Setting | Expected |
@@ -67,9 +68,9 @@ once, confirm these settings, and close it with **Cancel** so nothing changes:
 | Enabled converters | DAC tile 228, channel 0 only; no ADCs |
 | Clock | PLL on, reference 245.76 MHz, source tile 228, no distribution |
 | Sampling rate | 5.89824 GSPS |
-| Interpolation | 8x |
+| Interpolation | 4x |
 | Mixer | Fine, I/Q to Real, Nyquist zone 1, inverse sinc on |
-| AXI4-Stream | 128-bit (4 complex samples, I/Q interleaved) at 184.32 MHz; the script checks both |
+| AXI4-Stream | 256-bit (16 words = 8 complex samples, I/Q interleaved) at 184.32 MHz; the script checks both |
 | Datapath | Full-bandwidth DUC (not IMR) |
 | Multi-tile sync | Off |
 
@@ -175,11 +176,12 @@ Using hw_axi_1
 chirp_gen found (ID CHRP)
 DAC tile 228: state 15 (15 = running), power-up 1, PLL locked 1
 chirp_gen: DAC MMCM locked 1, handshake ready 1, apply pending 0
-DAC ch0: interpolation 8x, I/Q input 1, datapath mode 0, fabric words <N>
+DAC ch0: interpolation 4x, I/Q input 1, datapath mode 0, fabric words <N> (expected 16)
 DAC fabric heartbeat is changing
 ```
 
-Write down `<N>`: the expected fabric-word count has not yet been checked on silicon.
+Write down `<N>`: the fabric-word read-back has not yet been checked on silicon.
+For this build it should be 16 (eight I/Q pairs per clock).
 
 If the tile is not at state 15, fix the CLK104 profile (step 5), then run:
 
@@ -247,12 +249,29 @@ python scripts/plot_ila.py out/chirp.csv
 
 - In `out/chirp.png`, each pulse ramps linearly from −200 to +200 MHz over
   about 2 µs, with zero samples between pulses. The 4096-clock ILA window
-  (22.2 µs) holds two full pulses.
+  (22.2 µs, 32768 samples) holds two full pulses.
 - The analyzer (max hold) shows energy across about 300–700 MHz.
 - On the scope, if fitted, LED0 shows 2 µs pulses every 10 µs. The marker is
   digital: it does not include the DAC's analog latency.
 
 Raise `-amp` in steps only after the analog chain is known to be safe for it.
+
+### Wideband chirp (up to ~1.18 GHz)
+
+The 4x build passes about ±590 MHz around the NCO. Put the NCO where the whole
+RF band fits both the first Nyquist zone (0 to 2949 MHz) and your output path:
+the XM655 balun used for the 500 MHz examples covers roughly 10 MHz to 1 GHz,
+so a 1 GHz sweep needs a wider path (or a band at a higher NCO with a matching
+balun). `cw`, `chirp` and `noise` print a warning when the band crosses 0 Hz or
+2949 MHz at the current NCO.
+
+```tcl
+nco_set 1.5e9
+chirp -bw 1e9 -pw 2e-6 -pri 10e-6 -amp 0.1   ;# RF 1.0 .. 2.0 GHz
+```
+
+**Pass:** `out/chirp.png` ramps from −500 to +500 MHz; the spectrum panel is
+flat across ±500 MHz.
 
 ## Band-limited noise
 
@@ -266,13 +285,19 @@ it; `cw`/`chirp` switch back.
 nco_set 500e6
 noise -bw 200e6 -amp 0.1                       ;# continuous, ~400..600 MHz
 # noise -bw 100e6 -amp 0.1 -pw 2e-6 -pri 10e-6 ;# pulsed noise, 2 us every 10 us
+# noise -bw 200e6 -amp 0.1 -seed 7             ;# another noise realisation
 ```
 
 How it works: a fresh random complex value is drawn every `D = fs_bb/bw` samples
 and held in between (sample-and-hold), so the baseband band is about ±`bw`/2 wide
-with a sinc² envelope whose first nulls sit at ±`bw` and −13 dB shoulders beyond.
-Widen or narrow `-bw` to taste; the RFDC interpolation filter passes roughly
-±0.4·fs_bb (±295 MHz), so bandwidths up to ~590 MHz are usable.
+(−3 dB) with a sinc² envelope whose first nulls sit at ±`bw` and −13 dB shoulders
+beyond. Widen or narrow `-bw` to taste; the RFDC interpolation filter passes
+roughly ±0.4·fs_bb (±590 MHz), so bandwidths up to ~1.18 GHz are usable.
+
+Each `noise` command restarts the pseudo-random sequence from its seed, so the
+same command always produces the same samples, whatever ran before. `-seed`
+(0 to 2³²−1, default 0) selects another, equally valid realisation, for
+example to compare runs with uncorrelated noise.
 
 **Pass on the analyzer:** a raised noise floor spread across about `bw` around the
 centre (≈500 MHz), symmetric, dropping back to the floor outside it. Use
@@ -289,10 +314,9 @@ ila_capture out/noise.csv immediate
 python scripts/plot_ila.py out/noise.csv
 ```
 
-The bottom **Spectrum (dB)** panel of `out/noise.png` shows the band centred at
-0 (the NCO) with the sinc² shape; the instantaneous-frequency panel is noisy by
-nature and not meaningful here. The generator is deterministic (fixed seeds), so
-a capture repeats run to run.
+The bottom **Spectrum (dB)** panel of `out/noise.png` (an averaged spectrum)
+shows the band centred at 0 (the NCO) with the sinc² shape and nulls at ±`bw`;
+the instantaneous-frequency panel is noisy by nature and not meaningful here.
 
 ## 10. Check recovery once
 
@@ -365,10 +389,12 @@ to remove RF for certain, disconnect it or power the board down.
 | `nco_set <Hz>` | Set the fine-mixer NCO (the RF centre frequency) |
 | `cw <offset Hz> <amp 0..1>` | Continuous tone at NCO + offset |
 | `chirp ?-bw Hz? ?-pw s? ?-pri s? ?-offset Hz? ?-amp 0..1? ?-phase_deg deg?` | Pulsed LFM around NCO + offset (negative `-bw` sweeps down) |
-| `iq_options <swap> <ilv>` | I/Q swap and packing, applied on the next `cw`/`chirp` |
+| `noise ?-bw Hz? ?-amp 0..1? ?-pw s? ?-pri s? ?-seed n?` | Band-limited noise around the NCO; `-pw 0` (default) is continuous |
+| `iq_options <swap> <ilv>` | I/Q swap and packing, applied on the next `cw`/`chirp`/`noise` |
 | `gen_off` | Disable the generator |
 | `chirp_dump` | Print all generator registers |
 | `ila_capture <csv> ?immediate?` | Capture 4096 clocks, by default on the next pulse |
 
-Background and review history: [review_2026-09-29.md](review_2026-09-29.md).
+Background and review history: [review_2026-09-29.md](review_2026-09-29.md),
+[review_2026-10-01.md](review_2026-10-01.md) (4x interpolation).
 Turkish guide: [bringup_tr.md](bringup_tr.md).

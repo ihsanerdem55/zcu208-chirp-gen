@@ -2,14 +2,18 @@
 """Decode a full-rate Vivado ILA CSV capture into baseband I/Q plots.
 
 Run: python scripts/plot_ila.py out/chirp.csv
-Needs numpy and matplotlib. Input must contain probe0 (128-bit TDATA),
-probe1 (pulse gate), probe2 (TVALID), probe3 (TREADY). Signal names are
-auto-detected; use --data-column / --gate-column etc. for renamed probes.
+Needs numpy and matplotlib. Input must contain probe0 (256-bit TDATA, eight
+complex samples per clock), probe1 (pulse gate), probe2 (TVALID), probe3
+(TREADY). Signal names are auto-detected; use --data-column / --gate-column
+etc. for renamed probes, and --lanes 4 --fs-bb 737.28e6 for an old 8x build.
 """
 import argparse
 import csv
 import re
 from pathlib import Path
+
+LANES = 8                  # complex samples per fabric clock (RFDC 4x interpolation)
+FS_BB = 1474.56e6          # complex sample rate at the RFDC input
 
 
 def number(text, radix="HEX"):
@@ -32,8 +36,9 @@ def signed16(word):
     return word - 65536 if word & 32768 else word
 
 
-def read_capture(path, columns=None, interleaved=True):
+def read_capture(path, columns=None, interleaved=True, lanes=LANES):
     columns = columns or {}
+    width = 32 * lanes
     with open(path, newline="", encoding="utf-8-sig") as stream:
         rows = list(csv.reader(stream))
     if not rows:
@@ -78,17 +83,29 @@ def read_capture(path, columns=None, interleaved=True):
         # Do not drop rows: that would compress time and fabricate a frequency plot.
         if not values["ready"] or not values["valid"]:
             raise ValueError(f"Row {rownum}: DAC not streaming (TREADY/TVALID low); capture after startup")
-        if not -(1 << 127) <= values["data"] < (1 << 128):
-            raise ValueError(f"Row {rownum}: TDATA exceeds 128 bits")
-        word = values["data"] & ((1 << 128) - 1)
-        for lane in range(4):
+        if not -(1 << (width - 1)) <= values["data"] < (1 << width):
+            raise ValueError(f"Row {rownum}: TDATA exceeds {width} bits")
+        word = values["data"] & ((1 << width) - 1)
+        for lane in range(lanes):
             ibit = 32 * lane if interleaved else 16 * lane
-            qbit = ibit + 16 if interleaved else 16 * (lane + 4)
+            qbit = ibit + 16 if interleaved else 16 * (lane + lanes)
             samples.append((signed16(word >> ibit), signed16(word >> qbit)))
             gates.append(values["gate"])
-    if len(samples) < 8:
+    if len(samples) < 2 * lanes:
         raise ValueError("Need at least two fabric-clock samples")
     return samples, gates
+
+
+def power_spectrum(z, fs, segment=2048):
+    """Welch estimate (Hann, 50 % overlap) in dB relative to its peak."""
+    import numpy as np
+
+    n = min(segment, 1 << (int(z.size).bit_length() - 1))
+    window = np.hanning(n)
+    starts = range(0, z.size - n + 1, n // 2)
+    power = sum(np.abs(np.fft.fft(z[i:i + n] * window))**2 for i in starts) / len(starts)
+    psd = 10 * np.log10(np.fft.fftshift(power) + 1e-30)
+    return np.fft.fftshift(np.fft.fftfreq(n, d=1.0 / fs)), psd - psd.max()
 
 
 def plot(samples, gates, output, fs_bb, title):
@@ -115,17 +132,12 @@ def plot(samples, gates, output, fs_bb, title):
     axes[2].plot(t[1:], frequency, lw=0.8)
     axes[2].set_ylabel("Baseband frequency (MHz)")
     axes[2].set_xlabel("Time in capture (us)")
-    # Power spectrum of the active samples: shows the chirp band or the noise
-    # band and its shape, relative to the RFDC NCO centre (0 MHz here).
+    # Averaged (Welch) power spectrum of the active samples: shows the chirp
+    # band or the noise band and its shape, relative to the RFDC NCO (0 MHz).
     zc = z[active]
     if zc.size >= 16:
-        zc = zc - zc.mean()
-        window = np.hanning(zc.size)
-        spectrum = np.fft.fftshift(np.fft.fft(zc * window))
-        faxis = np.fft.fftshift(np.fft.fftfreq(zc.size, d=1.0 / fs_bb)) / 1e6
-        psd = 20 * np.log10(np.abs(spectrum) + 1e-9)
-        psd -= psd.max()
-        axes[3].plot(faxis, psd, lw=0.7)
+        faxis, psd = power_spectrum(zc, fs_bb)
+        axes[3].plot(faxis / 1e6, psd, lw=0.7)
         axes[3].set_ylim(-80, 5)
     else:
         axes[3].text(0.5, 0.5, "not enough active samples for a spectrum",
@@ -145,17 +157,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("capture", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--fs-bb", type=float, default=737.28e6)
+    parser.add_argument("--fs-bb", type=float, default=FS_BB)
+    parser.add_argument("--lanes", type=int, default=LANES, help="complex samples per TDATA word")
     parser.add_argument("--split", action="store_true", help="legacy RTL experiment packing only")
     for key in ("data", "gate", "valid", "ready"):
         parser.add_argument(f"--{key}-column")
     args = parser.parse_args()
     if not 0 < args.fs_bb < float("inf"):
         parser.error("--fs-bb must be positive and finite")
+    if not 1 <= args.lanes <= 16:
+        parser.error("--lanes must be 1..16")
     try:
         samples, gates = read_capture(args.capture,
             {k: getattr(args, f"{k}_column") for k in ("data", "gate", "valid", "ready")},
-            interleaved=not args.split)
+            interleaved=not args.split, lanes=args.lanes)
         output = args.output or args.capture.with_suffix(".png")
         plot(samples, gates, output, args.fs_bb, "ILA capture: " + args.capture.name)
     except (ValueError, OSError) as exc:

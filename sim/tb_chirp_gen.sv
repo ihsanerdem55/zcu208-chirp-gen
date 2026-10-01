@@ -6,7 +6,7 @@
 //  * A bit-exact reference model (same math as chirp_core, same sine table)
 //    checks EVERY output sample: model value while trig_out is high, zero otherwise.
 //  * Signals for the waveform window:
-//      i_ser, q_ser   : output samples serialised to 737.28 MSPS (set Waveform
+//      i_ser, q_ser   : output samples serialised to 1474.56 MSPS (set Waveform
 //                       Style = Analog, radix = Signed Decimal)
 //      f_inst_mhz     : instantaneous baseband frequency (real, show as Analog)
 //      trig           : pulse gate / scope trigger
@@ -17,8 +17,8 @@
 // -----------------------------------------------------------------------------
 `timescale 1ps/1ps
 module tb_chirp_gen;
-    localparam int  LANES   = 4;
-    localparam real FS_BB   = 737.28e6;          // complex sample rate at the AXIS port
+    localparam int  LANES   = 8;
+    localparam real FS_BB   = 1474.56e6;         // complex sample rate at the AXIS port
     localparam int  T_DCLK  = 5426;              // 184.32 MHz fabric clock period (ps)
 
     // ------------------------------------------------------------ clocks/resets
@@ -96,8 +96,11 @@ module tb_chirp_gen;
     endfunction
 
     // ------------------------------------------------ test-side configuration
-    // The scoreboard uses these; tests change them only while the output is off.
-    logic [31:0] cfg_f = 0, cfg_k = 0, cfg_p0 = 0;
+    // Written by the tests before APPLY. The scoreboard takes it over when the
+    // first block generated after params_load reaches the output: that block is
+    // always a gap (zeros, trig low), so tests may also reconfigure a running
+    // output and every block before the gap is checked with the old settings.
+    logic [31:0] cfg_f = 0, cfg_k = 0, cfg_p0 = 0, cfg_pri = 1;
     logic [15:0] cfg_amp = 0;
     logic        cfg_cw = 0, cfg_swap = 0, cfg_ilv = 0;
 
@@ -109,6 +112,7 @@ module tb_chirp_gen;
         cfg_p0  = $rtoi(phase_deg / 360.0 * 4294967296.0);
         cfg_amp = $rtoi(amp * 32767.0 + 0.5);
         cfg_cw  = cw; cfg_swap = swap; cfg_ilv = ilv;
+        cfg_pri = (pri == 0) ? 1 : pri;
         axi_write(16'h08, cfg_f);
         axi_write(16'h0C, cfg_k);
         axi_write(16'h10, pw);
@@ -142,10 +146,15 @@ module tb_chirp_gen;
         return p[13] ? -$signed(rom[a]) : $signed(rom[a]);
     endfunction
 
+    // configuration of the samples being checked
+    logic [31:0] act_f = 0, act_k = 0, act_p0 = 0, act_pri = 1;
+    logic [15:0] act_amp = 0;
+    logic        act_cw = 0, act_swap = 0, act_ilv = 0;
+
     function automatic logic signed [15:0] scale(input logic signed [15:0] x);
         logic signed [32:0] pr;
         logic [15:0] a;
-        a  = cfg_amp[15] ? 16'h7FFF : cfg_amp;
+        a  = act_amp[15] ? 16'h7FFF : act_amp;
         pr = x * $signed({1'b0, a}) + 33'sd16384;
         return pr[30:15];
     endfunction
@@ -155,9 +164,9 @@ module tb_chirp_gen;
         logic [63:0] F0, K, P0, phi, tri_n;
         logic [13:0] p;
         logic signed [15:0] ci, sq;
-        F0    = {{16{cfg_f[31]}}, cfg_f, 16'd0};
-        K     = cfg_cw ? 64'd0 : {{24{cfg_k[31]}}, cfg_k, 8'd0};
-        P0    = {16'd0, cfg_p0, 16'd0};
+        F0    = {{16{act_f[31]}}, act_f, 16'd0};
+        K     = act_cw ? 64'd0 : {{24{act_k[31]}}, act_k, 8'd0};
+        P0    = {16'd0, act_p0, 16'd0};
         tri_n = (n * (n - 64'd1)) >> 1;
         phi   = P0 + F0 * n + K * tri_n;          // wraps mod 2^64, we only need mod 2^48
         p     = phi[47:34];
@@ -167,24 +176,43 @@ module tb_chirp_gen;
     endfunction
 
     // ------------------------------------------------------ scoreboard
+    // A pulse starts at a rising edge of trig, or PRI clocks after the previous
+    // start while trig stays high (PW = PRI: back-to-back pulses).
+    // OUT_LAT: clocks from params_load to the output of the gap block (chirp_core
+    // generates it one clock after the load, PIPE + 1 = 7 clocks before m_axis).
+    localparam int OUT_LAT = 8;
     logic [63:0] n_smp = 0;                        // sample index inside the current pulse
+    logic [31:0] since = 0;                        // clocks since the current pulse start
     logic        trig_q = 0;
-    int          checked = 0, mism = 0, gated = 0;
+    logic [OUT_LAT:0] load_sr = '0;           // bit k: params_load k clocks ago
+    int          checked = 0, mism = 0, gated = 0, starts = 0, gap_err = 0;
     logic signed [15:0] lane_i [LANES];
     logic signed [15:0] lane_q [LANES];
 
     always @(posedge dclk) begin
         #1;
+        load_sr = {load_sr[OUT_LAT-1:0], dut.u_top.params_load};
+        if (load_sr[OUT_LAT]) begin
+            if (trig) gap_err++;                   // reload without a gap block
+            act_f = cfg_f; act_k = cfg_k; act_p0 = cfg_p0; act_pri = cfg_pri;
+            act_amp = cfg_amp; act_cw = cfg_cw; act_swap = cfg_swap; act_ilv = cfg_ilv;
+        end
+        if (drst_n) begin
+            if (trig && !trig_q) begin             // new pulse (or CW start)
+                n_smp = 0; since = 0; starts++;
+            end else if (trig && !act_cw && since == act_pri) begin
+                n_smp = 0; since = 0; starts++;
+            end
+        end
         // unpack the AXIS word as the RF-DAC would, undoing the swap option
         for (int m = 0; m < LANES; m++) begin
             logic signed [15:0] a, b;
-            if (cfg_ilv) begin a = tdata[32*m +: 16]; b = tdata[32*m + 16 +: 16]; end
+            if (act_ilv) begin a = tdata[32*m +: 16]; b = tdata[32*m + 16 +: 16]; end
             else         begin a = tdata[16*m +: 16]; b = tdata[16*(m + LANES) +: 16]; end
-            lane_i[m] = cfg_swap ? b : a;
-            lane_q[m] = cfg_swap ? a : b;
+            lane_i[m] = act_swap ? b : a;
+            lane_q[m] = act_swap ? a : b;
         end
         if (drst_n) begin
-            if (trig && !trig_q) n_smp = 0;        // new pulse (or CW start)
             for (int m = 0; m < LANES; m++) begin
                 logic [31:0] e;
                 e = trig ? ref_iq(n_smp + m) : 32'd0;
@@ -199,6 +227,7 @@ module tb_chirp_gen;
                 end
             end
             if (trig) n_smp = n_smp + LANES;
+            since  = since + 1;
             trig_q = trig;
         end
     end
@@ -268,25 +297,25 @@ module tb_chirp_gen;
         $display("T1: CW +10 MHz, full scale, split packing");
         setup_gen(1, 1, 0, 0, 10.0e6, 0, 100, 1000, 1.0, 0.0);
         repeat (20) @(posedge dclk);
-        capture("out/cw_split.txt", 4096);
+        capture("out/cw_split.txt", 2048);
         gen_off();
 
-        // T2: pulsed up-chirp -200 -> +200 MHz, PW 368 clk (2.0 us), PRI 500 clk (2.7 us)
-        $display("T2: pulsed LFM -200 -> +200 MHz, PW 2.0 us, PRI 2.7 us");
-        setup_gen(1, 0, 0, 0, -200.0e6, krate_for(400.0e6, 368), 368, 500, 1.0, 0.0);
+        // T2: pulsed up-chirp -500 -> +500 MHz, PW 368 clk (2.0 us), PRI 500 clk (2.7 us)
+        $display("T2: pulsed LFM -500 -> +500 MHz, PW 2.0 us, PRI 2.7 us");
+        setup_gen(1, 0, 0, 0, -500.0e6, krate_for(1000.0e6, 368), 368, 500, 1.0, 0.0);
         capture("out/chirp_split.txt", 1200);
         repeat (400) @(posedge dclk);
         gen_off();
 
-        // T3: down-chirp +150 -> -50 MHz, half amplitude, 90 deg start phase, short PRI
-        $display("T3: pulsed LFM +150 -> -50 MHz, amp 0.5, phase 90 deg, PW 100 clk, PRI 150 clk");
-        setup_gen(1, 0, 0, 0, 150.0e6, krate_for(-200.0e6, 100), 100, 150, 0.5, 90.0);
+        // T3: down-chirp +450 -> -150 MHz, half amplitude, 90 deg start phase, short PRI
+        $display("T3: pulsed LFM +450 -> -150 MHz, amp 0.5, phase 90 deg, PW 100 clk, PRI 150 clk");
+        setup_gen(1, 0, 0, 0, 450.0e6, krate_for(-600.0e6, 100), 100, 150, 0.5, 90.0);
         repeat (700) @(posedge dclk);
         gen_off();
 
-        // T4: CW -200 MHz with interleaved packing and I/Q swap
-        $display("T4: CW -200 MHz, interleaved packing + I/Q swap");
-        setup_gen(1, 1, 1, 1, -200.0e6, 0, 100, 1000, 1.0, 0.0);
+        // T4: CW -550 MHz with interleaved packing and I/Q swap
+        $display("T4: CW -550 MHz, interleaved packing + I/Q swap");
+        setup_gen(1, 1, 1, 1, -550.0e6, 0, 100, 1000, 1.0, 0.0);
         repeat (20) @(posedge dclk);
         capture("out/cw_ilv_swap.txt", 1024);
         gen_off();
@@ -297,17 +326,54 @@ module tb_chirp_gen;
         repeat (200) @(posedge dclk);
         if (gated != g0) begin $display("FAIL T5: trig_out active while disabled"); errors++; end
 
-        // T6: actual RFDC hardware format: interleaved I0,Q0,...,I3,Q3.
-        $display("T6: pulsed LFM in RFDC interleaved format");
-        setup_gen(1, 0, 0, 1, -200.0e6, krate_for(400.0e6, 368), 368, 1843, 0.5, 0.0);
+        // T6: actual RFDC hardware format: interleaved I0,Q0,...,I7,Q7.
+        $display("T6: pulsed LFM -500 -> +500 MHz in RFDC interleaved format, PRI 10 us");
+        setup_gen(1, 0, 0, 1, -500.0e6, krate_for(1000.0e6, 368), 368, 1843, 0.5, 0.0);
         capture("out/chirp_interleaved.txt", 4096);
+        gen_off();
+
+        // T7: pulse timer corner cases (every block is checked by the scoreboard)
+        $display("T7: back-to-back pulses PW = PRI = 3, then PW 1 / PRI 2");
+        setup_gen(1, 0, 0, 1, -300.0e6, krate_for(400.0e6, 3), 3, 3, 0.8, 30.0);
+        repeat (20) @(posedge dclk);
+        g0 = starts;
+        repeat (300) @(posedge dclk);
+        if (starts - g0 != 100) begin
+            $display("FAIL T7: %0d pulse starts in 300 clocks with PRI 3", starts - g0); errors++;
+        end
+        setup_gen(1, 0, 0, 1, 100.0e6, krate_for(50.0e6, 1), 1, 2, 0.8, 0.0);
+        repeat (20) @(posedge dclk);
+        g0 = starts;
+        repeat (300) @(posedge dclk);
+        if (starts - g0 != 150) begin
+            $display("FAIL T7: %0d pulse starts in 300 clocks with PRI 2", starts - g0); errors++;
+        end
+        gen_off();
+
+        // T8: reload while running, without gen_off in between. The blocks in
+        // flight must finish with the old amplitude/packing, and the new
+        // waveform must start cleanly after a one-block gap.
+        $display("T8: reload while running (chirp -> chirp -> CW -> chirp, packing changes)");
+        setup_gen(1, 0, 0, 1, -400.0e6, krate_for(800.0e6, 50), 50, 80, 1.0, 0.0);
+        repeat (130) @(posedge dclk);
+        setup_gen(1, 0, 1, 0, 300.0e6, krate_for(-500.0e6, 64), 64, 64, 0.3, 45.0);
+        repeat (200) @(posedge dclk);
+        setup_gen(1, 1, 0, 1, 123.0e6, 0, 0, 1, 0.7, 0.0);
+        repeat (150) @(posedge dclk);
+        g0 = starts;
+        setup_gen(1, 0, 1, 1, -100.0e6, krate_for(200.0e6, 40), 40, 90, 1.0, 180.0);
+        repeat (200) @(posedge dclk);
+        if (starts == g0) begin $display("FAIL T8: no pulse after reloading a running CW"); errors++; end
         gen_off();
 
         // summary
         $display("--------------------------------------------------------------");
         $display("Scoreboard: %0d samples checked (%0d inside pulses), %0d mismatches",
                  checked, gated, mism);
-        if (mism != 0 || gated < 10000) errors++;
+        if (mism != 0 || gated < 20000) errors++;
+        if (gap_err != 0) begin
+            $display("FAIL: %0d reloads reached the output without a gap block", gap_err); errors++;
+        end
         if (mon_errors != 0) begin
             $display("FAIL: ILA monitor ports differ from m_axis on %0d clocks", mon_errors); errors++;
         end
