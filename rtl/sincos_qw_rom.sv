@@ -3,7 +3,10 @@
 // Phase (14-bit, full cycle = 16384) -> cos and sin, 16-bit signed.
 // One dual-port quarter-wave block ROM (4096 x 16) serves both outputs:
 //   port A looks up sin(p), port B looks up cos(p) = sin(p + quarter cycle).
-// Latency: 3 clocks (address/quadrant register, BRAM output register, sign stage).
+// Latency: 4 clocks (address/quadrant register, BRAM read, BRAM output
+// register, sign stage). The second BRAM stage has no logic in front of it, so
+// it maps onto the block RAM's own output register (DOA_REG/DOB_REG) and the
+// sign stage starts from a register instead of the slower BRAM read latch.
 // Table contents: rtl/sincos_qw.mem  (made by scripts/gen_sincos_mem.py)
 // -----------------------------------------------------------------------------
 module sincos_qw_rom #(
@@ -36,19 +39,23 @@ module sincos_qw_rom #(
         neg_cos_1 <= q_cos[1];
     end
 
-    // ---- stage 2: BRAM read (registered output) ----
-    logic [15:0] d_sin, d_cos;
-    logic        neg_sin_2, neg_cos_2;
+    // ---- stages 2 and 3: BRAM read, BRAM output register ----
+    logic [15:0] d_sin, d_cos, d_sin_q, d_cos_q;
+    logic        neg_sin_2, neg_cos_2, neg_sin_3, neg_cos_3;
     always_ff @(posedge clk) begin
         d_sin     <= rom[a_sin];
         d_cos     <= rom[a_cos];
+        d_sin_q   <= d_sin;
+        d_cos_q   <= d_cos;
         neg_sin_2 <= neg_sin_1;
         neg_cos_2 <= neg_cos_1;
+        neg_sin_3 <= neg_sin_2;
+        neg_cos_3 <= neg_cos_2;
     end
 
-    // ---- stage 3: apply sign (table is 0..32767, so negation never overflows) ----
+    // ---- stage 4: apply sign (table is 0..32767, so negation never overflows) ----
     always_ff @(posedge clk) begin
-        sin_o <= neg_sin_2 ? -$signed(d_sin) : $signed(d_sin);
-        cos_o <= neg_cos_2 ? -$signed(d_cos) : $signed(d_cos);
+        sin_o <= neg_sin_3 ? -$signed(d_sin_q) : $signed(d_sin_q);
+        cos_o <= neg_cos_3 ? -$signed(d_cos_q) : $signed(d_cos_q);
     end
 endmodule

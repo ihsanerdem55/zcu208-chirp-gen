@@ -29,6 +29,14 @@
 // the pipeline with the gate. Exactly one block of zeros separates the old and
 // the new waveform, so a pulse start is always a rising edge of trig_out.
 //
+// Pipeline (block generated in clock c, 184.32 MHz):
+//   c+1 phi_a/ta, c+2 lane phases, c+3..c+6 sin/cos ROM (4 stages),
+//   c+7 source select register (DSP A/B), c+8 product (DSP M register),
+//   c+9 rounded amplitude (DSP P register), c+10 packed word,
+//   c+11 m_axis_tdata / trig_out (the RFDC-facing register).
+// Every DSP and block RAM uses its internal registers, and the packed word is
+// registered twice so placement can bridge the DSP columns and the RF-DAC tile.
+//
 // Register units (captured on params_load):
 //   f_start : signed 32-bit, f_Hz  = f_start * fs_bb / 2^32
 //   k_rate  : signed Q24.8,  slope = (k_rate/256) * fs_bb^2 / 2^32   [Hz/s]
@@ -63,8 +71,9 @@ module chirp_core #(
     output logic                     trig_out
 );
     localparam int W        = 48;          // accumulator width, Q32.16
-    localparam int ROM_LAT  = 3;           // sincos_qw_rom latency
-    localparam int PIPE     = 2 + ROM_LAT + 1; // lane stages A/B + ROM + amplitude stage
+    localparam int ROM_LAT  = 4;           // sincos_qw_rom latency
+    localparam int AMP_LAT  = 3;           // source register, product, rounding
+    localparam int PIPE     = 2 + ROM_LAT + AMP_LAT; // lane stages A/B + ROM + amplitude
 
     if (LANES < 2 || LANES > 16) begin : g_lanes_check
         $error("chirp_core: LANES must be 2..16");
@@ -159,22 +168,17 @@ module chirp_core #(
 
     // -------------------------------------------------- chirp accumulators
     // phi_r / t_r hold the state for the *next* block, blk_* for *this* block.
+    // No reset: start is 1 during and after reset, so they reload from P0/t0.
     logic [W-1:0] phi_r, blk_phi;
     logic [W-1:0] t_r   [1:LANES];
     logic [W-1:0] blk_t [1:LANES];
     assign blk_phi = start ? P0 : phi_r;
 
-    always_ff @(posedge clk) begin
-        if (!rst_n) phi_r <= '0;
-        else        phi_r <= blk_phi + blk_t[LANES];
-    end
+    always_ff @(posedge clk) phi_r <= blk_phi + blk_t[LANES];
 
     for (genvar m = 1; m <= LANES; m++) begin : g_acc
         assign blk_t[m] = start ? t0[m] : t_r[m];
-        always_ff @(posedge clk) begin
-            if (!rst_n) t_r[m] <= '0;
-            else        t_r[m] <= blk_t[m] + kinc[m];
-        end
+        always_ff @(posedge clk) t_r[m] <= blk_t[m] + kinc[m];
     end
 
     // lane phases: stage A registers the block terms, stage B adds them
@@ -225,7 +229,8 @@ module chirp_core #(
 
     // ------------------------------------------- per-block output controls
     // Captured on the same edges as gate, so ctl_d[i] describes the same block
-    // as gate_d[i]: the amplitude stage uses ctl_d[PIPE-2], packing ctl_d[PIPE-1].
+    // as gate_d[i]: source select and amplitude enter the DSP stage with
+    // ctl_d[PIPE-AMP_LAT-1], swap and packing are applied with ctl_d[PIPE-1].
     localparam int CTL_W = 19;             // {pack_ilv, iq_swap, noise_mode, amp}
     logic [CTL_W-1:0] ctl_g;
     logic [CTL_W-1:0] ctl_d [PIPE];
@@ -236,36 +241,37 @@ module chirp_core #(
     end
     logic        noise_sel, swap_o, ilv_o;
     logic [15:0] amp_sel;
-    assign {noise_sel, amp_sel} = ctl_d[PIPE-2][16:0];
+    assign {noise_sel, amp_sel} = ctl_d[PIPE-AMP_LAT-1][16:0];
     assign {ilv_o, swap_o}      = ctl_d[PIPE-1][18:17];
 
     // --------------------------------------------- amplitude scaling (DSP)
-    logic signed [15:0] i_s [LANES];
-    logic signed [15:0] q_s [LANES];
-    logic signed [16:0] amp_s;
-    assign amp_s = $signed({1'b0, amp_sel});
-
-    function automatic logic signed [15:0] scale(input logic signed [15:0] x,
-                                                  input logic signed [16:0] a);
-        logic signed [32:0] p;
-        p = x * a + 33'sd16384;            // round to nearest
-        return p[30:15];
-    endfunction
-
+    // Three registers per lane and component, mapped onto one DSP48E2:
+    // source (A) and amplitude (B) registers, product (M), rounded result (P).
+    // round(x * a / 2^15) = (x * a + 2^14) >> 15; |x| <= 32767, a <= 0x7FFF.
     logic signed [15:0] src_i [LANES];
     logic signed [15:0] src_q [LANES];
-    always_comb begin
-        for (int m = 0; m < LANES; m++) begin
-            src_i[m] = noise_sel ? $signed(noise_i[16*m +: 16]) : cos_l[m];
-            src_q[m] = noise_sel ? $signed(noise_q[16*m +: 16]) : sin_l[m];
-        end
-    end
+    logic signed [16:0] amp_r;
+    logic signed [32:0] prod_i [LANES];
+    logic signed [32:0] prod_q [LANES];
+    logic signed [32:0] rnd_i  [LANES];
+    logic signed [32:0] rnd_q  [LANES];
+    logic signed [15:0] i_s [LANES];
+    logic signed [15:0] q_s [LANES];
 
     always_ff @(posedge clk) begin
+        amp_r <= $signed({1'b0, amp_sel});
         for (int m = 0; m < LANES; m++) begin
-            i_s[m] <= scale(src_i[m], amp_s);
-            q_s[m] <= scale(src_q[m], amp_s);
+            src_i[m]  <= noise_sel ? $signed(noise_i[16*m +: 16]) : cos_l[m];
+            src_q[m]  <= noise_sel ? $signed(noise_q[16*m +: 16]) : sin_l[m];
+            prod_i[m] <= src_i[m] * amp_r;
+            prod_q[m] <= src_q[m] * amp_r;
+            rnd_i[m]  <= prod_i[m] + 33'sd16384;
+            rnd_q[m]  <= prod_q[m] + 33'sd16384;
         end
+    end
+    for (genvar m = 0; m < LANES; m++) begin : g_round
+        assign i_s[m] = rnd_i[m][30:15];
+        assign q_s[m] = rnd_q[m][30:15];
     end
 
     // ------------------------------------------------ gate delay matching
@@ -277,26 +283,35 @@ module chirp_core #(
     wire gate_al = gate_d[PIPE-1];         // aligned with i_s / q_s
 
     // ------------------------------------------------------ output packing
+    // pack_r holds the packed word; m_axis_tdata is its copy next to the RF-DAC.
+    logic [LANES*32-1:0] pack_r;
+    logic                gate_p;
+    always_ff @(posedge clk) begin
+        for (int m = 0; m < LANES; m++) begin
+            logic signed [15:0] iv, qv;
+            iv = gate_al ? (swap_o ? q_s[m] : i_s[m]) : 16'sd0;
+            qv = gate_al ? (swap_o ? i_s[m] : q_s[m]) : 16'sd0;
+            if (ilv_o) begin
+                pack_r[32*m      +: 16] <= iv;
+                pack_r[32*m + 16 +: 16] <= qv;
+            end else begin
+                pack_r[16*m            +: 16] <= iv;
+                pack_r[16*(m + LANES)  +: 16] <= qv;
+            end
+        end
+    end
+
     always_ff @(posedge clk) begin
         if (!rst_n) begin
+            gate_p        <= 1'b0;
             m_axis_tdata  <= '0;
             m_axis_tvalid <= 1'b0;
             trig_out      <= 1'b0;
         end else begin
+            gate_p        <= gate_al;
+            m_axis_tdata  <= gate_p ? pack_r : '0;
             m_axis_tvalid <= 1'b1;
-            trig_out      <= gate_al;
-            for (int m = 0; m < LANES; m++) begin
-                logic signed [15:0] iv, qv;
-                iv = gate_al ? (swap_o ? q_s[m] : i_s[m]) : 16'sd0;
-                qv = gate_al ? (swap_o ? i_s[m] : q_s[m]) : 16'sd0;
-                if (ilv_o) begin
-                    m_axis_tdata[32*m      +: 16] <= iv;
-                    m_axis_tdata[32*m + 16 +: 16] <= qv;
-                end else begin
-                    m_axis_tdata[16*m            +: 16] <= iv;
-                    m_axis_tdata[16*(m + LANES)  +: 16] <= qv;
-                end
-            end
+            trig_out      <= gate_p;
         end
     end
 endmodule

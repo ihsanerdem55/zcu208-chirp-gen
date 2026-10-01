@@ -56,8 +56,9 @@ module tb_noise;
     // --------------------------------------------- bit-exact noise_src model
     // Evaluated #1 after every DAC clock edge P_k. It replays the clock cycle
     // that ended at P_k one sample at a time and queues that cycle's LANES
-    // noise values; they reach m_axis three clocks later (noise_src stage 2,
-    // amplitude stage, output register).
+    // noise values; they reach m_axis six clocks later (noise_src stage 2,
+    // three DSP stages, packing and output registers). noise_src restarts one
+    // clock after reset or params_load (its restart flop).
     localparam logic [31:0] POLY = 32'hEDB8_8320;
     function automatic logic [31:0] lfsr_adv(input logic [31:0] s, input int steps);
         for (int i = 0; i < steps; i++) s = s[0] ? ((s >> 1) ^ POLY) : (s >> 1);
@@ -86,9 +87,10 @@ module tb_noise;
         return (r == 0) ? base : r;
     endfunction
 
-    localparam int MODEL_LAT = 3;
+    localparam int MODEL_LAT = 6;
     logic [31:0]  m_lf [8];
     logic         m_reseed = 0;                 // params_load seen in the previous cycle
+    logic         m_rq = 1;                     // noise_src restart flop, cycle being replayed
     logic [31:0]  seed_cfg = 0, seed_now = 0;   // written by the tests / in effect since APPLY
     logic [32:0]  m_acc;                        // nacc, plus a carry bit per sample
     logic [31:0]  m_inc = 0, m_ninc_last = 0;   // ninc of cycles k-2 and k-1
@@ -103,8 +105,8 @@ module tb_noise;
         int k;
         #1;
         for (int i = MODEL_LAT; i > 0; i--) m_q[i] = m_q[i-1];
-        if (!drst_n || m_reseed) begin          // reset, or reseed by an APPLY
-            for (int g = 0; g < 8; g++) m_lf[g] = seed_of(g, drst_n ? seed_now : 32'd0);
+        if (m_rq) begin                         // reset, or reseed by an APPLY
+            for (int g = 0; g < 8; g++) m_lf[g] = seed_of(g, seed_now);
             m_acc = 33'h0_FFFF_FFFF;
             m_hold_i = 0; m_hold_q = 0;
             w = '0;
@@ -123,6 +125,8 @@ module tb_noise;
             for (int g = 0; g < 8; g++) m_lf[g] = lfsr_adv(m_lf[g], LANES);
         end
         m_q[0] = w;
+        m_rq = !drst_n || m_reseed;             // restart flop for the next cycle
+        if (!drst_n) seed_now = 0;              // PHASE0 resets to 0
         m_inc = m_ninc_last;                    // noise_src registers (m+1)*ninc
         m_ninc_last = dut.u_top.u_core.u_noise.ninc;
         // compare the gated output with the model; skip clocks right after a

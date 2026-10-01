@@ -83,7 +83,13 @@ wait_on_run impl_1
 
 **Pass:** the run completes and `vivado/zcu208_chirp/zcu208_chirp.runs/impl_1/`
 contains `chirp_bd_wrapper.bit` plus the matching `.ltx` probes file. The
-implementation log shows `INFO: dbg_hub uses independent 100 MHz AXI clock`.
+implementation log shows `INFO: dbg_hub uses independent 100 MHz AXI clock`
+and `INFO: worst setup slack ...` from the post-route report hook.
+
+The same folder then holds `timing_summary.rpt`, `timing_worst_setup.rpt`,
+`timing_design_analysis.rpt` (logic levels and route/logic delay per path) and
+`timing_failing.txt`, a short list of the 40 worst setup paths. If WNS is
+negative, `timing_failing.txt` is the file to look at (or to send).
 
 ## 3. Check the implementation reports
 
@@ -366,6 +372,7 @@ to remove RF for certain, disconnect it or power the board down.
 | `plot_ila.py`: `DAC not streaming (TREADY/TVALID low)` | Captured before the RFDC accepted data | Capture again after `rfdc_status` shows state 15. |
 | Implementation: a critical warning that a `chirp_timing.xdc` constraint matched no objects, or `Expected one independent 100 MHz AXI clock net` | Synthesis renamed cells or nets that the CDC constraints and debug-hub hook look up | Find the real names with `get_cells`/`get_nets` and update the patterns. Never delete these constraints. |
 | Negative WNS only on `*_sync_reg[0]/D` endpoints between the AXI and DAC clocks | The synchronizer exceptions in `chirp_timing.xdc` were not applied | Check that the file is in the implementation constraint set, and look for the critical warning above. |
+| Negative WNS inside the DAC clock (`[Timing 38-282]`, `[Physopt 32-745]`) | A datapath path at 184.32 MHz | Open `impl_1/timing_failing.txt`: the start/end points name the stage, and the logic/route columns show whether it is logic depth or distance. Rebuild with `tcl/build_bd.tcl` so the implementation directives and ILA pipelining are in place. |
 
 ## Reference
 

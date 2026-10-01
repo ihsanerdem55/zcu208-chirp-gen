@@ -28,6 +28,15 @@ sorun giderme tablosu): [bringup.md](bringup.md).
   Nyquist bölgesi) aşarsa uyarır. `plot_ila.py` 8 lane ve 1474.56 MSPS
   varsayar (eski yakalamalar için `--lanes 4 --fs-bb 737.28e6`) ve ortalamalı
   spektrum çizer.
+- **Timing (ilk 4x derleme WNS/TNS negatifti):** DSP çarpıcısı artık tüm iç
+  registerlarıyla (A/B, M, P), sin/cos BRAM'i çıkış registeriyle çalışıyor;
+  DSP ile RF-DAC arasına bir register daha eklendi, gürültü seçicisi düz
+  AND-OR mux oldu, yüksek fanout'lu resetler registerlandı/kaldırıldı ve
+  ILA'ya 2 giriş pipeline aşaması eklendi. Implementation, timing odaklı
+  direktiflerle çalışıyor. Her çalıştırmadan sonra
+  `vivado/zcu208_chirp/zcu208_chirp.runs/impl_1/timing_failing.txt` en kötü
+  40 path'i listeler; timing yine tutmazsa bu dosyayı gönder. Çıkış gecikmesi
+  7'den 11 saate (60 ns) çıktı, örnekler değişmedi.
 - Ayrıntılar, testler ve donanımda kontrol edilecekler:
   [review_2026-10-01.md](review_2026-10-01.md).
 

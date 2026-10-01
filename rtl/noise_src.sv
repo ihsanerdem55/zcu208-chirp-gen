@@ -32,12 +32,14 @@
 // the 16-bit datapath).
 //
 // Reproducibility: reset and every reseed pulse (each APPLY) restart the
-// generator from its seeds, so the same command always produces the same
-// sequence whatever ran before. seed_sel (0 = default) XORs a rotated copy into
-// each LFSR seed to select a different, equally valid noise realisation.
+// generator from its seeds (one clock later, from a replicated register), so
+// the same command always produces the same sequence whatever ran before.
+// seed_sel (0 = default) XORs a rotated copy into each LFSR seed to select a
+// different, equally valid noise realisation.
 //
 // Pipeline: stage 1 registers the draw counts and candidate draws, stage 2
-// selects and registers the outputs (2 clocks latency, irrelevant for noise).
+// selects (a flat one-hot AND-OR mux) and registers the outputs (2 clocks
+// latency, irrelevant for noise).
 // Written with generate loops and constant array indices so that it also
 // simulates in Icarus Verilog.
 // -----------------------------------------------------------------------------
@@ -87,7 +89,10 @@ module noise_src #(
         return (r == 32'd0) ? base_seed(g) : r;
     endfunction
 
-    wire restart = !rst_n || reseed;
+    // registered restart: drives the synchronous reset of ~350 flops, so the
+    // tools may replicate it next to its loads
+    (* max_fanout = 64 *) logic restart;
+    always_ff @(posedge clk) restart <= !rst_n || reseed;
 
     // one real value: sum of four 13-bit signed LFSR slices (approx. Gaussian)
     function automatic logic signed [15:0] draw4(input logic [31:0] a, input logic [31:0] b,
@@ -144,24 +149,34 @@ module noise_src #(
     end
 
     // ------------------------------------------ held value selection (stage 2)
+    // lane m: the held value if n_q = 0, else candidate n_q - 1 (one-hot AND-OR)
     logic signed [15:0] hold_i, hold_q;
     logic [LANES*16-1:0] vi, vq;
     for (genvar m = 0; m < LANES; m++) begin : g_sel
-        assign vi[16*m +: 16] = (n_q[m] == 0) ? hold_i : fi_q[16*(n_q[m] - 1) +: 16];
-        assign vq[16*m +: 16] = (n_q[m] == 0) ? hold_q : fq_q[16*(n_q[m] - 1) +: 16];
+        always_comb begin
+            logic [15:0] si, sq;
+            si = (n_q[m] == 0) ? hold_i : 16'd0;
+            sq = (n_q[m] == 0) ? hold_q : 16'd0;
+            for (int k = 0; k < LANES; k++) begin
+                if ({{(32-NB){1'b0}}, n_q[m]} == k + 1) begin
+                    si = si | fi_q[16*k +: 16];
+                    sq = sq | fq_q[16*k +: 16];
+                end
+            end
+            vi[16*m +: 16] = si;
+            vq[16*m +: 16] = sq;
+        end
     end
 
     always_ff @(posedge clk) begin
         if (restart) begin
-            hold_i  <= 16'sd0;
-            hold_q  <= 16'sd0;
-            noise_i <= '0;
-            noise_q <= '0;
+            hold_i <= 16'sd0;
+            hold_q <= 16'sd0;
         end else begin
-            hold_i  <= vi[16*(LANES-1) +: 16];
-            hold_q  <= vq[16*(LANES-1) +: 16];
-            noise_i <= vi;
-            noise_q <= vq;
+            hold_i <= vi[16*(LANES-1) +: 16];
+            hold_q <= vq[16*(LANES-1) +: 16];
         end
+        noise_i <= vi;                    // follows hold/n_q, which reset
+        noise_q <= vq;
     end
 endmodule

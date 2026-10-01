@@ -179,8 +179,8 @@ module tb_chirp_gen;
     // A pulse starts at a rising edge of trig, or PRI clocks after the previous
     // start while trig stays high (PW = PRI: back-to-back pulses).
     // OUT_LAT: clocks from params_load to the output of the gap block (chirp_core
-    // generates it one clock after the load, PIPE + 1 = 7 clocks before m_axis).
-    localparam int OUT_LAT = 8;
+    // generates it one clock after the load, 11 clocks before m_axis).
+    localparam int OUT_LAT = 12;
     logic [63:0] n_smp = 0;                        // sample index inside the current pulse
     logic [31:0] since = 0;                        // clocks since the current pulse start
     logic        trig_q = 0;

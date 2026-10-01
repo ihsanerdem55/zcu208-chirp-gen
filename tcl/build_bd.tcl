@@ -43,6 +43,25 @@ if {$ADD_ILA} {
     add_files -fileset utils_1 -norecurse $repo_dir/tcl/debug_hub.tcl
     set_property STEPS.OPT_DESIGN.TCL.PRE $repo_dir/tcl/debug_hub.tcl [get_runs impl_1]
 }
+# After routing, write timing reports (timing_failing.txt lists the worst
+# paths) into the impl_1 run directory.
+add_files -fileset utils_1 -norecurse $repo_dir/tcl/timing_report.tcl
+set_property STEPS.ROUTE_DESIGN.TCL.POST $repo_dir/tcl/timing_report.tcl [get_runs impl_1]
+# Timing-driven implementation for the 256-bit, 184.32 MHz DAC datapath:
+# stronger placement/routing directives and post-route physical optimization.
+foreach {prop val} {
+    STEPS.OPT_DESIGN.ARGS.DIRECTIVE                 Explore
+    STEPS.PLACE_DESIGN.ARGS.DIRECTIVE               ExtraTimingOpt
+    STEPS.PHYS_OPT_DESIGN.IS_ENABLED                true
+    STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE            AggressiveExplore
+    STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE               AggressiveExplore
+    STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED     true
+    STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore
+} {
+    if {[catch {set_property $prop $val [get_runs impl_1]} err]} {
+        puts "WARNING: could not set impl_1 $prop = $val: $err"
+    }
+}
 update_compile_order -fileset sources_1
 
 # ------------------------------------------------------------ block design
@@ -180,11 +199,14 @@ connect_bd_net [get_bd_pins chirp_gen_0/trig_out] [get_bd_ports trig_out]
 # The IP-integrator ILA defaults to AXI-monitor mode, which ignores the native
 # probe widths; select native mode explicitly. Probes use chirp_gen_0/mon_*:
 # a net on an m_axis pin would detach that pin from the RFDC stream.
+# Two input pipeline stages let the 515 probe bits reach the ILA's block RAMs
+# (about 60 of them, spread over several columns) at 184.32 MHz.
 set ila_widths [concat [list 256 1 1 1] [lrepeat 16 16]]
 if {$ADD_ILA} {
     set ila [create_bd_cell -type ip -vlnv xilinx.com:ip:ila ila_dac]
     set cfg [list CONFIG.C_ENABLE_ILA_AXI_MON false CONFIG.C_MONITOR_TYPE Native \
-        CONFIG.C_NUM_OF_PROBES [llength $ila_widths] CONFIG.C_DATA_DEPTH 4096]
+        CONFIG.C_NUM_OF_PROBES [llength $ila_widths] CONFIG.C_DATA_DEPTH 4096 \
+        CONFIG.C_INPUT_PIPE_STAGES 2]
     set n 0
     foreach w $ila_widths { lappend cfg CONFIG.C_PROBE${n}_WIDTH $w; incr n }
     set_property -dict $cfg $ila
