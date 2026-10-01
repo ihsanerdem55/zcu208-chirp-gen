@@ -19,6 +19,11 @@
 // Nothing written to 0x04..0x1C reaches the generator until APPLY is written.
 // CDC: toggle handshake. Software must wait for STATUS[1] = 0 before changing
 // registers again (the Tcl helpers do this). Hardware rejects writes while busy.
+// The bundled transfer runs r_* (AXI) -> cap_* (DAC), both DONT_TOUCH: every
+// cap_* flop has a single load, so implementation never replicates a
+// destination out of the max-delay/bus-skew exception in chirp_timing.xdc.
+// The generator uses a DAC-domain copy of cap_*, one clock later, together
+// with params_load; that copy may be replicated freely.
 // DAC reset aborts a request and leaves output disabled; explicitly APPLY again
 // after STATUS[0] returns. The old toggle is baselined, never replayed.
 //
@@ -76,7 +81,14 @@ module chirp_axil_regs #(
     localparam logic [31:0] ID_VALUE = 32'h4348_5250;
 
     // ======================================================= AXI-Lite slave
-    logic [31:0] r_ctrl, r_fstart, r_krate, r_pw, r_pri, r_amp, r_phase0;
+    // Sources of the bundled AXI -> DAC transfer (see chirp_timing.xdc)
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] r_ctrl;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] r_fstart;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] r_krate;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] r_pw;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] r_pri;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] r_amp;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] r_phase0;
     logic        req_tgl;                         // flips on every APPLY
     logic [31:0] status;
 
@@ -184,6 +196,17 @@ module chirp_axil_regs #(
     logic dac_online;
     logic ack_tgl;                                 // dac domain copy of req_tgl
 
+    // Destinations of the bundled AXI -> DAC transfer (see chirp_timing.xdc):
+    // written only on an acknowledged request, read only by the copy below.
+    (* DONT_TOUCH = "TRUE" *) logic [4:0]  cap_ctrl;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] cap_fstart;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] cap_krate;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] cap_pw;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] cap_pri;
+    (* DONT_TOUCH = "TRUE" *) logic [15:0] cap_amp;
+    (* DONT_TOUCH = "TRUE" *) logic [31:0] cap_phase0;
+    logic cap_load;
+
     always_ff @(posedge dac_clk or negedge dac_rst_n) begin
         if (!dac_rst_n) begin
             startup     <= '0;
@@ -191,6 +214,14 @@ module chirp_axil_regs #(
             req_sync    <= '0;
             req_seen    <= 1'b0;
             ack_tgl     <= 1'b0;
+            cap_ctrl    <= 5'b01000;                  // pack_ilv = 1
+            cap_fstart  <= '0;
+            cap_krate   <= '0;
+            cap_pw      <= 32'd100;
+            cap_pri     <= 32'd1000;
+            cap_amp     <= 16'h4000;
+            cap_phase0  <= '0;
+            cap_load    <= 1'b0;
             params_load <= 1'b0;
             enable      <= 1'b0;
             cw_mode     <= 1'b0;
@@ -206,7 +237,7 @@ module chirp_axil_regs #(
         end else begin
             req_sync    <= {req_sync[0], req_tgl};
             req_seen    <= req_sync[1];
-            params_load <= 1'b0;
+            cap_load    <= 1'b0;
             startup <= {startup[1:0], 1'b1};
             if (!dac_online) begin
                 // Synchronize and consume the pre-reset toggle without loading
@@ -215,20 +246,29 @@ module chirp_axil_regs #(
                 if (&startup) dac_online <= 1'b1;
             end else if (req_sync[1] != req_seen) begin
                 // AXI-side registers are quasi-static here (software waits on STATUS[1])
-                enable      <= r_ctrl[0];
-                cw_mode     <= r_ctrl[1];
-                iq_swap     <= r_ctrl[2];
-                pack_ilv    <= r_ctrl[3];
-                noise_mode  <= r_ctrl[4];
-                f_start     <= r_fstart;
-                k_rate      <= r_krate;
-                pw          <= r_pw;
-                pri         <= (r_pri == 0) ? 32'd1 : r_pri;
-                amp         <= r_amp[15:0];
-                phase0      <= r_phase0;
-                params_load <= 1'b1;
+                cap_ctrl    <= r_ctrl[4:0];
+                cap_fstart  <= r_fstart;
+                cap_krate   <= r_krate;
+                cap_pw      <= r_pw;
+                cap_pri     <= r_pri;
+                cap_amp     <= r_amp[15:0];
+                cap_phase0  <= r_phase0;
+                cap_load    <= 1'b1;
                 ack_tgl     <= req_sync[1];
             end
+            // DAC-domain copy for the generator, with its load pulse
+            params_load <= cap_load;
+            enable      <= cap_ctrl[0];
+            cw_mode     <= cap_ctrl[1];
+            iq_swap     <= cap_ctrl[2];
+            pack_ilv    <= cap_ctrl[3];
+            noise_mode  <= cap_ctrl[4];
+            f_start     <= cap_fstart;
+            k_rate      <= cap_krate;
+            pw          <= cap_pw;
+            pri         <= (cap_pri == 0) ? 32'd1 : cap_pri;
+            amp         <= cap_amp;
+            phase0      <= cap_phase0;
         end
     end
 

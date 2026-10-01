@@ -8,9 +8,10 @@
 #   open_run impl_1
 #   source tcl/timing_report.tcl        ;# writes into ./out
 #
-# timing_failing.txt is a short plain-text list of the worst setup paths
-# (slack, logic levels, logic/route delay, clocks, start -> end) that can be
-# pasted into a message.
+# timing_failing.txt starts with WNS/WHS and the number of failing setup paths,
+# then lists the worst setup paths (slack, logic levels, logic/route delay,
+# clocks, start -> end); it can be pasted into a message. Bus skew is not part
+# of WNS: see timing_bus_skew.rpt.
 # =============================================================================
 proc tr_prop {obj name} {
     if {[catch {get_property $name $obj} v] || $v eq ""} { return "-" }
@@ -32,9 +33,14 @@ proc tr_write {} {
     catch {report_design_analysis -timing -max_paths 50 -file [file join $tr_dir timing_design_analysis.rpt]}
     catch {report_design_analysis -logic_level_distribution -file [file join $tr_dir timing_logic_levels.rpt]}
     catch {report_utilization -file [file join $tr_dir utilization.rpt]}
+    catch {report_bus_skew -file [file join $tr_dir timing_bus_skew.rpt]}
+    catch {report_cdc -details -file [file join $tr_dir timing_cdc.rpt]}
 
     set tr_paths [get_timing_paths -setup -max_paths 40 -nworst 1 -unique_pins -sort_by slack]
+    set tr_hold  [lindex [get_timing_paths -hold -max_paths 1 -nworst 1] 0]
+    set tr_nfail [llength [get_timing_paths -setup -max_paths 1000 -nworst 1 -unique_pins -slack_lesser_than 0]]
     set tr_fd [open [file join $tr_dir timing_failing.txt] w]
+    puts $tr_fd "WNS [tr_prop [lindex $tr_paths 0] SLACK] ns, WHS [tr_prop $tr_hold SLACK] ns, failing setup endpoints: $tr_nfail"
     puts $tr_fd [format "%-8s %-4s %-7s %-7s %-34s %s" slack lvls logic route "clocks (start -> end)" "startpoint -> endpoint"]
     foreach p $tr_paths {
         puts $tr_fd [format "%-8s %-4s %-7s %-7s %-34s %s -> %s" \

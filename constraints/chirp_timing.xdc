@@ -8,8 +8,14 @@
 
 # Bundled parameter transfer, AXI -> DAC. req_sync gives the data at least two
 # DAC clocks to settle; bound propagation and skew to one DAC period (5.425 ns).
+# Sources r_* and destinations cap_* are DONT_TOUCH flops with no logic between
+# them (apart from the load enable), and each cap_* has a single load, so
+# implementation cannot replicate them out of these exceptions. (The previous
+# destinations fanned out into the generator: implementation replicated
+# cw_mode_reg into cw_mode_reg_rep*, which no exception covered, and those
+# AXI -> DAC paths failed by about 1 ns.)
 set src [get_cells -hier -regexp {.*u_regs/r_(ctrl|fstart|krate|pw|pri|amp|phase0)_reg(\[[0-9]+\])?}]
-set dst [get_cells -hier -regexp {.*u_regs/(enable|cw_mode|iq_swap|pack_ilv|noise_mode|f_start|k_rate|pw|pri|amp|phase0)_reg(\[[0-9]+\])?}]
+set dst [get_cells -hier -regexp {.*u_regs/cap_(ctrl|fstart|krate|pw|pri|amp|phase0)_reg(\[[0-9]+\])?}]
 set_max_delay -datapath_only 5.425 -from $src -to $dst
 set_bus_skew 5.425 -from $src -to $dst
 

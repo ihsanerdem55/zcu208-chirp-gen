@@ -37,6 +37,13 @@ sorun giderme tablosu): [bringup.md](bringup.md).
   `vivado/zcu208_chirp/zcu208_chirp.runs/impl_1/timing_failing.txt` en kötü
   40 path'i listeler; timing yine tutmazsa bu dosyayı gönder. Çıkış gecikmesi
   7'den 11 saate (60 ns) çıktı, örnekler değişmedi.
+- **Asıl timing hatası (ikinci derleme):** `timing_failing.txt`, DAC veri
+  yolunun timing'i karşıladığını (en kötü +0,93 ns) gösterdi. Başarısız olan
+  yalnızca 8 path vardı: `r_ctrl_reg[1]` (AXI) → `cw_mode_reg_rep*` (DAC),
+  yaklaşık −1,05 ns. Implementation `cw_mode` registerını çoğaltmış, kopyalar
+  CDC istisnasının dışında kalmıştı. Artık aktarım tek yüklü,
+  `DONT_TOUCH` olan `cap_*` registerlarında bitiyor; jeneratör bunların DAC
+  tarafındaki kopyasını kullanıyor ve XDC `cap_*`'ı hedefliyor.
 - Ayrıntılar, testler ve donanımda kontrol edilecekler:
   [review_2026-10-01.md](review_2026-10-01.md).
 

@@ -114,8 +114,9 @@ report_drc            -file out/drc.rpt
 - No DRC errors.
 - In the CDC report, every crossing is either constrained or one of the
   intended ones: the first stage of `req_sync`, `ack_sync`, `rdy_sync`,
-  `hb_sync` and `lock_sync`, the bundled parameter bus (bounded to 5.425 ns),
-  and the reset IPs' own synchronizers.
+  `hb_sync` and `lock_sync`, the bundled parameter bus `r_*` → `cap_*`
+  (bounded to 5.425 ns), and the reset IPs' own synchronizers.
+- `timing_bus_skew.rpt` shows the `r_*` → `cap_*` bus skew met.
 - `trig_out` (scope marker) and `cpu_reset` (push-button) are intentionally
   false-pathed. No other port or internal path is unconstrained.
 
@@ -372,6 +373,7 @@ to remove RF for certain, disconnect it or power the board down.
 | `plot_ila.py`: `DAC not streaming (TREADY/TVALID low)` | Captured before the RFDC accepted data | Capture again after `rfdc_status` shows state 15. |
 | Implementation: a critical warning that a `chirp_timing.xdc` constraint matched no objects, or `Expected one independent 100 MHz AXI clock net` | Synthesis renamed cells or nets that the CDC constraints and debug-hub hook look up | Find the real names with `get_cells`/`get_nets` and update the patterns. Never delete these constraints. |
 | Negative WNS only on `*_sync_reg[0]/D` endpoints between the AXI and DAC clocks | The synchronizer exceptions in `chirp_timing.xdc` were not applied | Check that the file is in the implementation constraint set, and look for the critical warning above. |
+| Negative WNS from `u_regs/r_*_reg` (AXI clock) to a `*_reg_rep*` register in the DAC clock | A destination of the bundled transfer was replicated outside the exception (the cause of the first 4x failures, fixed with the `cap_*` capture registers) | Make sure the build uses the current `chirp_axil_regs.sv` and `chirp_timing.xdc`; `timing_failing.txt` should show no AXI→DAC path. |
 | Negative WNS inside the DAC clock (`[Timing 38-282]`, `[Physopt 32-745]`) | A datapath path at 184.32 MHz | Open `impl_1/timing_failing.txt`: the start/end points name the stage, and the logic/route columns show whether it is logic depth or distance. Rebuild with `tcl/build_bd.tcl` so the implementation directives and ILA pipelining are in place. |
 
 ## Reference
