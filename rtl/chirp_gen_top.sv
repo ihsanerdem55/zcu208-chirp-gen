@@ -2,7 +2,7 @@
 // chirp_gen_top.sv  --  AXI-Lite registers + chirp core
 // -----------------------------------------------------------------------------
 module chirp_gen_top #(
-    parameter int    LANES    = 4,
+    parameter int    LANES    = 8,
     parameter int    ADDR_W   = 16,
     parameter        MEM_FILE = "sincos_qw.mem"
 ) (
@@ -36,7 +36,7 @@ module chirp_gen_top #(
     input  logic                    m_axis_tready,
     output logic                    trig_out
 );
-    logic               enable, cw_mode, iq_swap, pack_ilv, params_load;
+    logic               enable, cw_mode, iq_swap, pack_ilv, noise_mode, params_load;
     logic signed [31:0] f_start, k_rate;
     logic        [31:0] pw, pri, phase0;
     logic        [15:0] amp;
@@ -50,7 +50,7 @@ module chirp_gen_top #(
         .s_axi_rdata, .s_axi_rresp, .s_axi_rvalid, .s_axi_rready,
         .dac_mmcm_locked, .dac_mmcm_reset, .dac_domain_reset,
         .dac_clk, .dac_rst_n,
-        .enable, .cw_mode, .iq_swap, .pack_ilv,
+        .enable, .cw_mode, .iq_swap, .pack_ilv, .noise_mode,
         .f_start, .k_rate, .pw, .pri, .amp, .phase0,
         .params_load
     );
@@ -58,7 +58,7 @@ module chirp_gen_top #(
     chirp_core #(.LANES(LANES), .MEM_FILE(MEM_FILE)) u_core (
         .clk   (dac_clk),
         .rst_n (dac_rst_n),
-        .enable, .cw_mode, .iq_swap, .pack_ilv,
+        .enable, .cw_mode, .iq_swap, .pack_ilv, .noise_mode,
         .f_start, .k_rate, .phase0, .pw, .pri, .amp,
         .params_load,
         .m_axis_tdata, .m_axis_tvalid, .m_axis_tready,

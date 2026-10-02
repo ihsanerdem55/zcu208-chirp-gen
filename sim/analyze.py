@@ -2,7 +2,8 @@
 """Check the RTL capture against a bit-exact Python model and plot the results.
 
 Run after the testbench (from the sim/ folder):  python3 analyze.py
-Outputs: pass/fail lines on stdout and out/sim_results.png
+Outputs: pass/fail lines on stdout, out/sim_results.png and
+out/chirp_interleaved.png (the README figure, docs/chirp_interleaved_sim.png)
 """
 import os
 import sys
@@ -11,8 +12,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from gen_sincos_mem import table  # noqa: E402
 
-LANES = 4
-FS_BB = 737.28e6
+LANES = 8                  # complex samples per 184.32 MHz fabric clock
+FS_BB = 1474.56e6          # 5.89824 GSPS / 4x interpolation
 QW = np.array(table(), dtype=np.int64)
 M48 = (1 << 48) - 1
 
@@ -97,11 +98,11 @@ check("CW image (-10 MHz) < -75 dBc", image < -75, f"({image:.1f} dBc)")
 Ic, Qc, Tc = load("out/chirp_split.txt")
 PW, PRI = 368, 500
 Ns = PW * LANES
-bw = 400e6
+bw = 1000e6
 k_rate = int(round((bw / FS_BB * 2**32) / Ns * 256))
 rise = np.flatnonzero((Tc[1:] == 1) & (Tc[:-1] == 0)) + 1
 st = rise[0]
-mi, mq = model_pulse(fword(-200e6), k_rate, 0, 0x7FFF, Ns)
+mi, mq = model_pulse(fword(-bw / 2), k_rate, 0, 0x7FFF, Ns)
 check("chirp pulse bit-exact vs model", np.array_equal(mi, Ic[st:st + Ns]) and np.array_equal(mq, Qc[st:st + Ns]),
       f"({Ns} samples)")
 gate_len = np.sum(Tc[st:st + PRI * LANES])
@@ -116,23 +117,47 @@ z = Ic[st:st + Ns] + 1j * Qc[st:st + Ns]
 finst = np.angle(z[1:] * np.conj(z[:-1])) / (2 * np.pi) * FS_BB
 t = np.arange(1, Ns) / FS_BB
 # phi[n] - phi[n-1] = F0 + K*(n-1)  ->  exact frequency of each sample-to-sample step
-f_ideal = (fword(-200e6) + (k_rate / 256) * np.arange(0, Ns - 1)) * FS_BB / 2**32
+f_ideal = (fword(-bw / 2) + (k_rate / 256) * np.arange(0, Ns - 1)) * FS_BB / 2**32
 ferr = finst - f_ideal
-# the estimator sees the 14-bit phase quantisation (+-1/16384 cycle per sample => ~+-45 kHz)
-check("chirp inst. frequency error", np.max(np.abs(ferr)) < 100e3 and abs(np.mean(ferr)) < 1e3,
+# the estimator sees the 14-bit phase quantisation: +-1/16384 cycle per sample,
+# i.e. +-FS_BB/16384 = +-90 kHz at 1474.56 MSPS
+check("chirp inst. frequency error", np.max(np.abs(ferr)) < 1.2 * FS_BB / 2**14 and abs(np.mean(ferr)) < 1e3,
       f"(max {np.max(np.abs(ferr))/1e3:.1f} kHz, mean {np.mean(ferr):.1f} Hz)")
 slope = (k_rate / 256) * FS_BB**2 / 2**32
 print(f"INFO: chirp slope {slope/1e12:.4f} MHz/us, sweep {slope*Ns/FS_BB/1e6:.2f} MHz in {Ns/FS_BB*1e6:.3f} us")
 
-# --------------------------------- T3: interleaved packing + I/Q swap
+# --------------------------------- T4: interleaved packing + I/Q swap
 Ii, Qi, _ = load("out/cw_ilv_swap.txt", interleaved=True)
 xi = Ii + 1j * Qi
 Xi = np.fft.fftshift(np.fft.fft(xi * np.blackman(len(xi))))
 fi = np.fft.fftshift(np.fft.fftfreq(len(xi), 1 / FS_BB))
 fpk = fi[np.argmax(np.abs(Xi))]
-# T3 keeps FSTART = -200 MHz from T2; swapping I/Q mirrors it to +200 MHz
-check("interleaved packing + I/Q swap mirrors -200 MHz to +200 MHz", abs(fpk - 200e6) < FS_BB / len(xi),
+# T4 sets FSTART = -550 MHz; swapping I/Q mirrors it to +550 MHz
+check("interleaved packing + I/Q swap mirrors -550 MHz to +550 MHz", abs(fpk - 550e6) < FS_BB / len(xi),
       f"(peak at {fpk/1e6:.3f} MHz)")
+
+# ------------------------------------------- noise band (tb_noise T6)
+# Sample-and-hold noise drawn at bw = 200 MHz: the averaged spectrum must follow
+# sinc^2(f/bw) in band, with its -3 dB width close to bw and nulls near +-bw.
+In, Qn, Tn = load("out/noise_bw200.txt", interleaved=True)
+xn = In + 1j * Qn
+bw_n = 200e6
+seg = 1024
+win_n = np.hanning(seg)
+starts = range(0, len(xn) - seg + 1, seg // 2)
+Pn = sum(np.abs(np.fft.fft(xn[i:i + seg] * win_n))**2 for i in starts) / len(starts)
+Pn = np.fft.fftshift(Pn)
+fn = np.fft.fftshift(np.fft.fftfreq(seg, 1 / FS_BB))
+Pn_db = 10 * np.log10(Pn / np.mean(Pn[np.abs(fn) < 0.1 * bw_n]))
+inband = np.abs(fn) <= 0.5 * bw_n
+dev = np.max(np.abs(Pn_db[inband] - 10 * np.log10(np.sinc(fn[inband] / bw_n)**2)))
+above = fn[Pn_db > -3]
+w3 = (above.max() - above.min()) / bw_n
+null = max(Pn_db[np.argmin(np.abs(fn - bw_n))], Pn_db[np.argmin(np.abs(fn + bw_n))])
+check("noise gated continuously", np.all(Tn == 1))
+check("noise band follows sinc^2 within 1.5 dB for |f| <= bw/2", dev < 1.5, f"(max deviation {dev:.2f} dB)")
+check("noise -3 dB width ~ bw", 0.8 < w3 < 1.2, f"({w3:.3f} x bw)")
+check("noise first null at +-bw below -15 dB", null < -15, f"({null:.1f} dB)")
 
 # ------------------------------------------------------------- plots
 try:
@@ -147,7 +172,7 @@ try:
     tt = np.arange(len(Ic)) / FS_BB * 1e6
     ax[1].plot(tt, Ic, lw=0.5, label="I"); ax[1].plot(tt, Qc, lw=0.5, label="Q", alpha=0.7)
     ax[1].plot(tt, Tc * 36000, "k", lw=1, label="trig_out")
-    ax[1].set_title("Pulsed LFM: PW 2.0 us, PRI 2.71 us, -200 to +200 MHz")
+    ax[1].set_title(f"Pulsed LFM: PW 2.0 us, PRI 2.71 us, {-bw/2e6:.0f} to +{bw/2e6:.0f} MHz")
     ax[1].set_xlabel("Time (us)"); ax[1].legend(loc="upper right"); ax[1].grid(alpha=0.3)
     ax[2].plot(t * 1e6, finst / 1e6, lw=0.8, label="RTL instantaneous frequency")
     ax[2].plot(t * 1e6, f_ideal / 1e6, "--", lw=1, label="ideal")
@@ -156,7 +181,16 @@ try:
     ax[2].legend(); ax[2].grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig("out/sim_results.png", dpi=110)
+    plt.close(fig)
     print("INFO: wrote out/sim_results.png")
+
+    # README figure: the T6 capture in the RFDC interleaved format, decoded and
+    # plotted by the same code as a hardware ILA capture
+    from plot_ila import plot as plot_capture
+    Ix, Qx, Tx = load("out/chirp_interleaved.txt", interleaved=True)
+    plot_capture(list(zip(Ix, Qx)), list(Tx), "out/chirp_interleaved.png", FS_BB,
+                 f"RTL simulation: interleaved {bw/1e6:.0f} MHz chirp (not a hardware capture)")
+    print("INFO: wrote out/chirp_interleaved.png")
 except ImportError:
     pass
 

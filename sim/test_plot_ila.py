@@ -10,30 +10,54 @@ from plot_ila import number, read_capture
 
 
 class CaptureTests(unittest.TestCase):
-    def capture(self, rows):
+    def capture(self, rows, **kwargs):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "capture.csv"
             with path.open("w", newline="") as f:
                 csv.writer(f).writerows(rows)
-            return read_capture(path)
+            return read_capture(path, **kwargs)
 
-    def fixture(self):
-        lanes = [(1, -1), (-32768, 32767), (123, -456), (-9, 10)]
+    LANES8 = [(1, -1), (-32768, 32767), (123, -456), (-9, 10),
+              (32767, -32768), (0, 7), (-1, 0), (4660, -22136)]
+
+    def fixture(self, lanes=None):
+        lanes = lanes or self.LANES8
         word = sum(((i & 65535) | ((q & 65535) << 16)) << (32*n)
                    for n, (i, q) in enumerate(lanes))
+        digits = 8 * len(lanes)
+        top = 32 * len(lanes) - 1
         return lanes, [
-            ["Sample in Buffer", "chirp/m_axis_tdata[127:0]", "chirp/trig_out",
+            ["Sample in Buffer", f"chirp/m_axis_tdata[{top}:0]", "chirp/trig_out",
              "chirp/m_axis_tvalid", "chirp/m_axis_tready"],
             ["Radix - UNSIGNED", "HEX", "BIN", "BIN", "BIN"],
-            ["0", f"{word:032x}", "1", "1", "1"],
-            ["1", f"{word:032x}", "1", "1", "1"],
+            ["0", f"{word:0{digits}x}", "1", "1", "1"],
+            ["1", f"{word:0{digits}x}", "1", "1", "1"],
         ]
 
     def test_signed_lane_order(self):
         lanes, rows = self.fixture()
         samples, gates = self.capture(rows)
         self.assertEqual(samples, lanes * 2)
-        self.assertEqual(gates, [1] * 8)
+        self.assertEqual(gates, [1] * 16)
+
+    def test_split_packing(self):
+        lanes = self.LANES8
+        word = sum(((i & 65535) << (16*n)) | ((q & 65535) << (16*(n + 8)))
+                   for n, (i, q) in enumerate(lanes))
+        _, rows = self.fixture()
+        for row in rows[2:]:
+            row[1] = f"{word:064x}"
+        self.assertEqual(self.capture(rows, interleaved=False)[0], lanes * 2)
+
+    def test_legacy_four_lanes(self):
+        lanes, rows = self.fixture(self.LANES8[:4])
+        self.assertEqual(self.capture(rows, lanes=4)[0], lanes * 2)
+
+    def test_wider_than_stream_is_rejected(self):
+        _, rows = self.fixture()
+        rows[-1][1] = "1" + rows[-1][1]
+        with self.assertRaisesRegex(ValueError, "exceeds 256 bits"):
+            self.capture(rows)
 
     def test_decimal_and_probe_names(self):
         lanes, rows = self.fixture()
@@ -45,12 +69,12 @@ class CaptureTests(unittest.TestCase):
 
     def test_vivado_uppercase_bus_signal(self):
         lanes, rows = self.fixture()
-        rows[0][1] = "chirp_gen_0_m_axis_TDATA[127:0]"
+        rows[0][1] = "chirp_gen_0_m_axis_TDATA[255:0]"
         self.assertEqual(self.capture(rows)[0], lanes * 2)
 
     def test_block_design_monitor_nets(self):
         lanes, rows = self.fixture()
-        rows[0][1:] = ["chirp_bd_i/chirp_gen_0_mon_data[127:0]", "chirp_bd_i/chirp_gen_0_mon_gate",
+        rows[0][1:] = ["chirp_bd_i/chirp_gen_0_mon_data[255:0]", "chirp_bd_i/chirp_gen_0_mon_gate",
                        "chirp_bd_i/chirp_gen_0_mon_valid", "chirp_bd_i/chirp_gen_0_mon_ready"]
         rows[0].append("chirp_bd_i/iq_slice_0_Dout[15:0]")
         rows[1].append("HEX")

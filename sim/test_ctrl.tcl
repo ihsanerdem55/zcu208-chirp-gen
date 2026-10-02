@@ -41,8 +41,8 @@ proc creg_wr {name value} {
 rename rd32 real_rd32
 rename wr32 real_wr32
 set tile_state 15
-# DAC ch0 read-back: 8x interpolation, I/Q input, full-bandwidth DUC, 8 fabric words
-array set rfdc_cfg {0x40046040 8 0x40046044 1 0x40046034 0 0x40046008 8}
+# DAC ch0 read-back: 4x interpolation, I/Q input, full-bandwidth DUC, 16 fabric words
+array set rfdc_cfg {0x40046040 4 0x40046044 1 0x40046034 0 0x40046008 16}
 proc rd32 {address} {
     if {$address == 0x4004400C} { return $::tile_state }
     if {$address == 0x40044228} { return 12 }
@@ -57,6 +57,8 @@ proc rejects_without_writes {script} {
     assert {![llength $::writes]} "invalid command wrote hardware: $script"
 }
 assert {$::DAC_TILE == 0 && $::PACK_ILV == 1} "tile/packing defaults"
+assert {$::INTERP == 4 && $::LANES == 8} "4x interpolation, eight samples per clock"
+assert {$::FS_BB == 1474.56e6 && abs($::FCLK - 184.32e6) < 1} "baseband rate and fabric clock"
 assert {[rfdc_tile_ctrl] == 0x40044000} "tile 228 register base"
 assert {[rfdc_block_drp] == 0x40046000} "DAC channel 0 register base"
 cw 10e6 0.5
@@ -66,9 +68,55 @@ set writes {}
 chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -phase_deg 270
 assert {$control == 9} "chirp must send interleaved IQ"
 assert {[lsearch -exact $writes {PHASE0 3221225472}] >= 0} "unsigned phase word"
-foreach command {{cw 10e6 -0.1} {cw 400e6} {chirp -amp 1.1} {chirp -unknown 3}
+
+# ---- band-limited noise ----
+set writes {}
+noise -bw 200e6 -amp 0.1
+assert {$control == 27} "continuous noise sets noise+cw+ilv+enable (0x1B)"
+assert {[lindex $writes 0] eq {CTRL 8}} "old stream disabled before noise"
+set ninc [expr {wide(round(pow(2,32) * 200e6 / $::FS_BB)) & 0xFFFFFFFF}]
+assert {[lsearch -exact $writes [list KRATE $ninc]] >= 0} "noise bandwidth word goes to KRATE"
+assert {[lsearch -exact $writes {FSTART 0}] >= 0} "noise clears the start frequency"
+assert {[lsearch -exact $writes {PHASE0 0}] >= 0} "default noise seed is 0"
+set writes {}
+noise -bw 100e6 -pw 2e-6 -pri 10e-6 -amp 0.2
+assert {$control == 25} "pulsed noise clears the cw (continuous) bit (0x19)"
+assert {[lsearch -exact $writes [list PW [expr {wide(round(2e-6*$::FCLK))}]]] >= 0} "pulsed noise PW in clocks"
+assert {[lsearch -exact $writes [list PRI [expr {wide(round(10e-6*$::FCLK))}]]] >= 0} "pulsed noise PRI in clocks"
+set writes {}
+noise -bw 1e9 -seed 4294967295
+assert {[lsearch -exact $writes {PHASE0 4294967295}] >= 0} "noise seed goes to PHASE0"
+set ninc [expr {wide(round(pow(2,32) * 1e9 / $::FS_BB)) & 0xFFFFFFFF}]
+assert {[lsearch -exact $writes [list KRATE $ninc]] >= 0} "1 GHz noise band fits the 4x baseband"
+foreach command {{noise -bw 0} {noise -unknown 3} {noise -bw 100e6 -pw 10e-6 -pri 1e-6} {noise -bw Inf}
+                 {noise -seed -1} {noise -seed 1.5} {noise -seed 4294967296}} {
+    rejects_without_writes $command
+}
+puts "PASS: noise sets bandwidth word/mode, pulsing, seed, and rejects bad options"
+
+# A band that crosses 0 Hz or FS_DAC/2 at the current NCO is reported, not refused.
+rename puts real_puts
+proc puts {args} { lappend ::printed [lindex $args end] }
+set printed {}
+chirp -bw 1.1e9 -pw 2e-6 -pri 10e-6
+assert {[llength [lsearch -all $printed {WARNING: RF band*}]] == 1} "1.1 GHz chirp at a 500 MHz NCO folds below DC"
+set ::NCO_HZ 1.5e9
+set printed {}
+chirp -bw 1.1e9 -pw 2e-6 -pri 10e-6
+noise -bw 1e9
+assert {[llength [lsearch -all $printed {WARNING: RF band*}]] == 0} "the same bands fit at a 1.5 GHz NCO"
+set ::NCO_HZ 2.8e9
+set printed {}
+cw 300e6
+assert {[llength [lsearch -all $printed {WARNING: RF band*}]] == 1} "tone above FS_DAC/2"
+set ::NCO_HZ 500e6
+rename puts {}
+rename real_puts puts
+puts "PASS: RF band check against the NCO and the first Nyquist zone"
+
+foreach command {{cw 10e6 -0.1} {cw 800e6} {chirp -amp 1.1} {chirp -unknown 3}
                  {chirp -pw 0} {chirp -pw 10e-6 -pri 1e-6} {chirp -pri 100}
-                 {chirp -offset 300e6 -bw 200e6} {chirp -pw Inf} {nco_set Inf}} {
+                 {chirp -offset 600e6 -bw 400e6} {chirp -pw Inf} {nco_set Inf}} {
     rejects_without_writes $command
 }
 set status 0
@@ -83,10 +131,12 @@ set word [expr {wide(round(1.5e9 / $::FS_DAC * pow(2, 48))) & 0xFFFFFFFFFFFF}]
 assert {[lindex [lindex $writes 0] 0] == 0x4004609C} "NCO writes tile 228"
 assert {[lindex [lindex $writes 0] 1] == ($word & 65535)} "NCO low word"
 assert {[lindex [lindex $writes end] 0] == 0x40046020} "NCO update register"
+assert {$::NCO_HZ == 1.5e9} "nco_set records the NCO for the band check"
+nco_set 500e6
 puts "PASS: control defaults, range checks, pending APPLY, reconfiguration and NCO addresses"
 
 # The frequency math is only valid for the configuration it was written for.
-foreach {key bad} {0x40046040 4 0x40046044 0 0x40046034 2} {
+foreach {key bad} {0x40046040 8 0x40046044 0 0x40046034 2} {
     set good $rfdc_cfg($key)
     set rfdc_cfg($key) $bad
     rejects_without_writes {nco_set 500e6}
@@ -95,11 +145,11 @@ foreach {key bad} {0x40046040 4 0x40046044 0 0x40046034 2} {
     set rfdc_cfg($key) $good
 }
 set ::RFDC_CONFIG_CHECK 0
-set rfdc_cfg(0x40046040) 4
+set rfdc_cfg(0x40046040) 8
 set writes {}
 nco_set 500e6
 assert {[llength $writes] > 0} "config check override"
-set rfdc_cfg(0x40046040) 8
+set rfdc_cfg(0x40046040) 4
 set ::RFDC_CONFIG_CHECK 1
 puts "PASS: RFDC interpolation / I/Q / datapath read-back mismatches refuse to drive the DAC"
 

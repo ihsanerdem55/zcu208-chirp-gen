@@ -2,25 +2,40 @@
 // chirp_core.sv  --  pulsed LFM chirp / CW generator, LANES complex samples per clock
 //
 // Runs in the DAC fabric clock domain (184.32 MHz for the reference design).
-// Sample rate seen by the math: fs_bb = LANES * f_clk = 737.28 MSPS complex.
+// Sample rate seen by the math: fs_bb = LANES * f_clk = 1474.56 MSPS complex
+// (LANES = 8, RF-DAC 4x interpolation at 5.89824 GSPS).
 //
 // Discrete chirp (per sample n inside a pulse):
 //     f[n]   = F0 + K*n                   (frequency word, turns/sample * 2^32)
 //     phi[n] = P0 + F0*n + K*n*(n-1)/2    (phase word)
-// For a block of LANES samples starting at sample N:
-//     phi[N+m] = phi[N] + m*f[N] + K*m*(m-1)/2      m = 0..LANES-1
-//     phi[N+L] = phi[N] + L*f[N] + K*L*(L-1)/2
-//     f[N+L]   = f[N]   + L*K
+// For a block of L = LANES samples starting at sample N, lane m has
+//     phi[N+m] = phi[N] + T_m[N],   T_m[N] = m*f[N] + K*m*(m-1)/2
+//     T_m[N+L] = T_m[N] + m*L*K                       m = 1..L
+//     phi[N+L] = phi[N] + T_L[N]
 // All accumulators are 48-bit Q32.16 (16 fractional bits) and wrap modulo 2^48.
 //
-// Timing structure (LANES = 4, 184.32 MHz): the multiples of f and K are kept
-// in their own accumulators, so every recurrence is one 2-operand 48-bit add:
-//     g = 4f + 6K   ->  phi' = phi + g,   g' = g + 16K
-//     h = 3f + 3K   ->  lane 3 = phi + h, h' = h + 12K
-//     f' = f + 4K;  lane 1 = phi + f;  lane 2 = phi + 2f + K
-// Constants derived from the parameters are registered every clock. The first
-// block after a parameter load is generated one clock after params_load, so the
-// registered constants are always current when used.
+// Timing structure: every T_m is its own accumulator, so each recurrence is a
+// single 2-operand 48-bit add behind the start mux, whatever LANES is. The lane
+// phases are one more 2-operand add (phi + T_m) in a separate stage.
+// The start values T_m[0] = m*F0 + K*m*(m-1)/2 and the increments m*L*K are
+// shift-add products of the quasi-static parameters, registered every clock in
+// two stages (the start phase P0 is delayed to match). A parameter load holds
+// the pulse timer in restart for one extra clock: the first block after
+// params_load is generated two clocks later, when the registered constants are
+// current, and is the first one gated.
+//
+// Reload while running: the blocks already in flight finish with the old
+// parameters, because amplitude, noise select, I/Q swap and packing travel down
+// the pipeline with the gate. Exactly one block of zeros separates the old and
+// the new waveform, so a pulse start is always a rising edge of trig_out.
+//
+// Pipeline (block generated in clock c, 184.32 MHz):
+//   c+1 phi_a/ta, c+2 lane phases, c+3..c+6 sin/cos ROM (4 stages),
+//   c+7 source select register (DSP A/B), c+8 product (DSP M register),
+//   c+9 rounded amplitude (DSP P register), c+10 packed word,
+//   c+11 m_axis_tdata / trig_out (the RFDC-facing register).
+// Every DSP and block RAM uses its internal registers, and the packed word is
+// registered twice so placement can bridge the DSP columns and the RF-DAC tile.
 //
 // Register units (captured on params_load):
 //   f_start : signed 32-bit, f_Hz  = f_start * fs_bb / 2^32
@@ -30,16 +45,17 @@
 //   amp     : unsigned Q1.15, 0x7FFF = full scale (values above are clamped)
 // -----------------------------------------------------------------------------
 module chirp_core #(
-    parameter int    LANES    = 4,
+    parameter int    LANES    = 8,
     parameter        MEM_FILE = "sincos_qw.mem"
 ) (
     input  logic                     clk,
     input  logic                     rst_n,
     // parameters (stable, updated together with a params_load pulse)
     input  logic                     enable,
-    input  logic                     cw_mode,     // 1 = continuous tone at f_start, no pulsing
+    input  logic                     cw_mode,     // 1 = continuous output at f_start, no pulsing
     input  logic                     iq_swap,     // 1 = swap I and Q (mirrors the spectrum)
-    input  logic                     pack_ilv,    // 0 = {Q3..Q0,I3..I0}, 1 = {Q3,I3,..,Q0,I0}
+    input  logic                     pack_ilv,    // 0 = {Q[L-1]..Q0,I[L-1]..I0}, 1 = {Q[L-1],I[L-1],..,Q0,I0}
+    input  logic                     noise_mode,  // 1 = band-limited noise instead of chirp/CW
     input  logic signed [31:0]       f_start,
     input  logic signed [31:0]       k_rate,
     input  logic        [31:0]       phase0,
@@ -55,34 +71,63 @@ module chirp_core #(
     output logic                     trig_out
 );
     localparam int W        = 48;          // accumulator width, Q32.16
-    localparam int ROM_LAT  = 3;           // sincos_qw_rom latency
-    localparam int PIPE     = 2 + ROM_LAT + 1; // lane stages A/B + ROM + amplitude stage
+    localparam int ROM_LAT  = 4;           // sincos_qw_rom latency
+    localparam int AMP_LAT  = 3;           // source register, product, rounding
+    localparam int PIPE     = 2 + ROM_LAT + AMP_LAT; // lane stages A/B + ROM + amplitude
 
-    if (LANES != 4) begin : g_lanes_check
-        $error("chirp_core: the phase datapath is written for LANES = 4");
+    if (LANES < 2 || LANES > 16) begin : g_lanes_check
+        $error("chirp_core: LANES must be 2..16");
     end
 
+    // x * c for an elaboration-time constant c, as signed-digit shift-adds:
+    // at most three terms for every product used here, and no DSP inference.
+    function automatic logic [W-1:0] mulc(input logic [W-1:0] x, input int c);
+        logic [W-1:0] r;
+        int n;
+        r = '0;
+        n = c;
+        for (int b = 0; b < 16; b++) begin
+            if (n % 2 != 0) begin
+                if (n % 4 == 1) begin r = r + (x << b); n = n - 1; end
+                else            begin r = r - (x << b); n = n + 1; end
+            end
+            n = n / 2;
+        end
+        return r;
+    endfunction
+
     // ------------------------------------------------------------------ params
-    logic [W-1:0] F0, K, P0;
+    logic [W-1:0] F0, K;
     assign F0 = {f_start, 16'd0};
     assign K  = cw_mode ? '0 : {{8{k_rate[31]}}, k_rate, 8'd0};
-    assign P0 = {phase0, 16'd0};
 
     logic [15:0] amp_c;                    // clamp to <= 0x7FFF so the product never overflows
     assign amp_c = amp[15] ? 16'h7FFF : amp;
 
     // ------------------------------------------------------ derived constants
     // Registered every clock from quasi-static parameters (see header).
-    logic [W-1:0] k4, k12, k16, g0, h0;
+    //   stage 1: m*F0, K*m*(m-1)/2, increments m*L*K, timer limits
+    //   stage 2: start values T_m[0] = m*F0 + K*m*(m-1)/2
+    logic [W-1:0] fm   [1:LANES];
+    logic [W-1:0] ktri [1:LANES];
+    logic [W-1:0] kinc [1:LANES];
+    logic [W-1:0] t0   [1:LANES];
+    for (genvar m = 1; m <= LANES; m++) begin : g_const
+        always_ff @(posedge clk) begin
+            fm[m]   <= mulc(F0, m);
+            ktri[m] <= mulc(K, m * (m - 1) / 2);
+            kinc[m] <= mulc(K, m * LANES);
+            t0[m]   <= fm[m] + ktri[m];
+        end
+    end
+
+    logic [W-1:0] p0_1, P0;                // start phase, delayed like t0
     logic [31:0]  pri_m1, pw_m1;
     logic         pw_nz;
     always_ff @(posedge clk) begin
-        k4     <= K << 2;
-        k12    <= (K << 3) + (K << 2);
-        k16    <= K << 4;
-        g0     <= ((F0 + K) << 2) + (K << 1);  // 4*F0 + 6*K
-        h0     <= (F0 + K) + ((F0 + K) << 1);  // 3*F0 + 3*K
-        pri_m1 <= pri - 32'd1;                 // pri >= 1 (register block clamps 0)
+        p0_1   <= {phase0, 16'd0};
+        P0     <= p0_1;
+        pri_m1 <= pri - 32'd1;             // pri >= 1 (register block clamps 0)
         pw_m1  <= pw - 32'd1;
         pw_nz  <= (pw != 0);
     end
@@ -92,9 +137,11 @@ module chirp_core #(
     // The wrap and pulse-width compares run in parallel on the current count:
     // cnt never exceeds pri-1 (it restarts on every load), so cnt+1 < pw is
     // cnt < pw-1 when pw > 0, and the next count is 0 exactly when it wraps.
+    // A load restarts the timer for two clocks (params_load, ld_d) and gates
+    // only the second restart, so the first gated block uses settled constants.
     logic [31:0] cnt;
-    logic        gate, wrap;
-    (* max_fanout = 32 *) logic start;     // selects 4 x 48 accumulator bits
+    logic        gate, wrap, ld_d;
+    (* max_fanout = 32 *) logic start;     // selects (LANES+1) x 48 accumulator bits
 
     assign wrap = (cnt >= pri_m1);
 
@@ -103,53 +150,51 @@ module chirp_core #(
             cnt   <= '0;
             start <= 1'b1;
             gate  <= 1'b0;
-        end else if (params_load || !enable) begin
-            // restart the pulse train (and the chirp phase) on every parameter load
-            cnt   <= '0;
-            start <= 1'b1;
-            gate  <= enable && (cw_mode || (pw != 0));
+            ld_d  <= 1'b0;
         end else begin
-            cnt   <= wrap ? 32'd0 : cnt + 32'd1;
-            start <= !cw_mode && wrap;                   // CW: phase runs freely
-            gate  <= cw_mode || (wrap ? pw_nz : (pw_nz && (cnt < pw_m1)));
+            ld_d <= params_load;
+            if (params_load || ld_d || !enable) begin
+                // restart the pulse train (and the chirp phase) on every parameter load
+                cnt   <= '0;
+                start <= 1'b1;
+                gate  <= !params_load && enable && (cw_mode || (pw != 0));
+            end else begin
+                cnt   <= wrap ? 32'd0 : cnt + 32'd1;
+                start <= !cw_mode && wrap;                   // CW: phase runs freely
+                gate  <= cw_mode || (wrap ? pw_nz : (pw_nz && (cnt < pw_m1)));
+            end
         end
     end
 
     // -------------------------------------------------- chirp accumulators
-    logic [W-1:0] phi_r, f_r, g_r, h_r;    // state for the *next* block
-    logic [W-1:0] blk_phi, blk_f, blk_g, blk_h;  // state for *this* block
+    // phi_r / t_r hold the state for the *next* block, blk_* for *this* block.
+    // No reset: start is 1 during and after reset, so they reload from P0/t0.
+    logic [W-1:0] phi_r, blk_phi;
+    logic [W-1:0] t_r   [1:LANES];
+    logic [W-1:0] blk_t [1:LANES];
     assign blk_phi = start ? P0 : phi_r;
-    assign blk_f   = start ? F0 : f_r;
-    assign blk_g   = start ? g0 : g_r;
-    assign blk_h   = start ? h0 : h_r;
 
-    always_ff @(posedge clk) begin
-        if (!rst_n) begin
-            phi_r <= '0;
-            f_r   <= '0;
-            g_r   <= '0;
-            h_r   <= '0;
-        end else begin
-            phi_r <= blk_phi + blk_g;      // phi + 4f + 6K
-            f_r   <= blk_f   + k4;         // f + 4K
-            g_r   <= blk_g   + k16;        // 4(f + 4K) + 6K
-            h_r   <= blk_h   + k12;        // 3(f + 4K) + 3K
-        end
+    always_ff @(posedge clk) phi_r <= blk_phi + blk_t[LANES];
+
+    for (genvar m = 1; m <= LANES; m++) begin : g_acc
+        assign blk_t[m] = start ? t0[m] : t_r[m];
+        always_ff @(posedge clk) t_r[m] <= blk_t[m] + kinc[m];
     end
 
     // lane phases: stage A registers the block terms, stage B adds them
-    //   lane m = phi + m*f + K*m*(m-1)/2  ->  phi, phi + f, phi + 2f + K, phi + h
-    logic [W-1:0] phi_a, t1_a, t2_a, t3_a;
+    //   lane 0 = phi,  lane m = phi + T_m
+    logic [W-1:0] phi_a;
+    logic [W-1:0] ta       [1:LANES-1];
     logic [W-1:0] lane_phi [LANES];
     always_ff @(posedge clk) begin
         phi_a       <= blk_phi;
-        t1_a        <= blk_f;
-        t2_a        <= (blk_f << 1) + K;
-        t3_a        <= blk_h;
         lane_phi[0] <= phi_a;
-        lane_phi[1] <= phi_a + t1_a;
-        lane_phi[2] <= phi_a + t2_a;
-        lane_phi[3] <= phi_a + t3_a;
+    end
+    for (genvar m = 1; m < LANES; m++) begin : g_lane_phase
+        always_ff @(posedge clk) begin
+            ta[m]       <= blk_t[m];
+            lane_phi[m] <= phi_a + ta[m];
+        end
     end
 
     // -------------------------------------------- sin/cos lookup per lane
@@ -165,24 +210,68 @@ module chirp_core #(
         );
     end
 
+    // ------------------------------------------- band-limited noise source
+    // Reuses KRATE (k_rate) as the noise bandwidth word (ninc) and PHASE0 as the
+    // seed selector. noise_src free-runs and restarts from its seed on every
+    // load; the mux below selects it in place of the sin/cos lookup, so the
+    // amplitude, pulse gate, I/Q swap and packing stages are shared with the
+    // chirp path unchanged.
+    logic [LANES*16-1:0] noise_i, noise_q;
+    noise_src #(.LANES(LANES)) u_noise (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .reseed   (params_load),
+        .seed_sel (phase0),
+        .ninc     (k_rate),
+        .noise_i  (noise_i),
+        .noise_q  (noise_q)
+    );
+
+    // ------------------------------------------- per-block output controls
+    // Captured on the same edges as gate, so ctl_d[i] describes the same block
+    // as gate_d[i]: source select and amplitude enter the DSP stage with
+    // ctl_d[PIPE-AMP_LAT-1], swap and packing are applied with ctl_d[PIPE-1].
+    localparam int CTL_W = 19;             // {pack_ilv, iq_swap, noise_mode, amp}
+    logic [CTL_W-1:0] ctl_g;
+    logic [CTL_W-1:0] ctl_d [PIPE];
+    always_ff @(posedge clk) begin
+        ctl_g    <= {pack_ilv, iq_swap, noise_mode, amp_c};
+        ctl_d[0] <= ctl_g;
+        for (int i = 1; i < PIPE; i++) ctl_d[i] <= ctl_d[i-1];
+    end
+    logic        noise_sel, swap_o, ilv_o;
+    logic [15:0] amp_sel;
+    assign {noise_sel, amp_sel} = ctl_d[PIPE-AMP_LAT-1][16:0];
+    assign {ilv_o, swap_o}      = ctl_d[PIPE-1][18:17];
+
     // --------------------------------------------- amplitude scaling (DSP)
+    // Three registers per lane and component, mapped onto one DSP48E2:
+    // source (A) and amplitude (B) registers, product (M), rounded result (P).
+    // round(x * a / 2^15) = (x * a + 2^14) >> 15; |x| <= 32767, a <= 0x7FFF.
+    logic signed [15:0] src_i [LANES];
+    logic signed [15:0] src_q [LANES];
+    logic signed [16:0] amp_r;
+    logic signed [32:0] prod_i [LANES];
+    logic signed [32:0] prod_q [LANES];
+    logic signed [32:0] rnd_i  [LANES];
+    logic signed [32:0] rnd_q  [LANES];
     logic signed [15:0] i_s [LANES];
     logic signed [15:0] q_s [LANES];
-    logic signed [16:0] amp_s;
-    assign amp_s = $signed({1'b0, amp_c});
-
-    function automatic logic signed [15:0] scale(input logic signed [15:0] x,
-                                                  input logic signed [16:0] a);
-        logic signed [32:0] p;
-        p = x * a + 33'sd16384;            // round to nearest
-        return p[30:15];
-    endfunction
 
     always_ff @(posedge clk) begin
+        amp_r <= $signed({1'b0, amp_sel});
         for (int m = 0; m < LANES; m++) begin
-            i_s[m] <= scale(cos_l[m], amp_s);
-            q_s[m] <= scale(sin_l[m], amp_s);
+            src_i[m]  <= noise_sel ? $signed(noise_i[16*m +: 16]) : cos_l[m];
+            src_q[m]  <= noise_sel ? $signed(noise_q[16*m +: 16]) : sin_l[m];
+            prod_i[m] <= src_i[m] * amp_r;
+            prod_q[m] <= src_q[m] * amp_r;
+            rnd_i[m]  <= prod_i[m] + 33'sd16384;
+            rnd_q[m]  <= prod_q[m] + 33'sd16384;
         end
+    end
+    for (genvar m = 0; m < LANES; m++) begin : g_round
+        assign i_s[m] = rnd_i[m][30:15];
+        assign q_s[m] = rnd_q[m][30:15];
     end
 
     // ------------------------------------------------ gate delay matching
@@ -194,26 +283,35 @@ module chirp_core #(
     wire gate_al = gate_d[PIPE-1];         // aligned with i_s / q_s
 
     // ------------------------------------------------------ output packing
+    // pack_r holds the packed word; m_axis_tdata is its copy next to the RF-DAC.
+    logic [LANES*32-1:0] pack_r;
+    logic                gate_p;
+    always_ff @(posedge clk) begin
+        for (int m = 0; m < LANES; m++) begin
+            logic signed [15:0] iv, qv;
+            iv = gate_al ? (swap_o ? q_s[m] : i_s[m]) : 16'sd0;
+            qv = gate_al ? (swap_o ? i_s[m] : q_s[m]) : 16'sd0;
+            if (ilv_o) begin
+                pack_r[32*m      +: 16] <= iv;
+                pack_r[32*m + 16 +: 16] <= qv;
+            end else begin
+                pack_r[16*m            +: 16] <= iv;
+                pack_r[16*(m + LANES)  +: 16] <= qv;
+            end
+        end
+    end
+
     always_ff @(posedge clk) begin
         if (!rst_n) begin
+            gate_p        <= 1'b0;
             m_axis_tdata  <= '0;
             m_axis_tvalid <= 1'b0;
             trig_out      <= 1'b0;
         end else begin
+            gate_p        <= gate_al;
+            m_axis_tdata  <= gate_p ? pack_r : '0;
             m_axis_tvalid <= 1'b1;
-            trig_out      <= gate_al;
-            for (int m = 0; m < LANES; m++) begin
-                logic signed [15:0] iv, qv;
-                iv = gate_al ? (iq_swap ? q_s[m] : i_s[m]) : 16'sd0;
-                qv = gate_al ? (iq_swap ? i_s[m] : q_s[m]) : 16'sd0;
-                if (pack_ilv) begin
-                    m_axis_tdata[32*m      +: 16] <= iv;
-                    m_axis_tdata[32*m + 16 +: 16] <= qv;
-                end else begin
-                    m_axis_tdata[16*m            +: 16] <= iv;
-                    m_axis_tdata[16*(m + LANES)  +: 16] <= qv;
-                end
-            end
+            trig_out      <= gate_p;
         end
     end
 endmodule

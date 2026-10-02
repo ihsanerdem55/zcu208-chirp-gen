@@ -19,6 +19,7 @@ create_project chirp_sim $proj_dir -part xczu48dr-fsvg1517-2-e -force
 
 add_files -norecurse [list \
     $repo_dir/rtl/sincos_qw_rom.sv \
+    $repo_dir/rtl/noise_src.sv \
     $repo_dir/rtl/chirp_core.sv \
     $repo_dir/rtl/chirp_axil_regs.sv \
     $repo_dir/rtl/chirp_gen_top.sv \
@@ -26,7 +27,7 @@ add_files -norecurse [list \
     $repo_dir/rtl/sincos_qw.mem ]
 set_property top chirp_gen_wrapper [get_filesets sources_1]
 
-add_files -fileset sim_1 -norecurse $repo_dir/sim/tb_chirp_gen.sv
+add_files -fileset sim_1 -norecurse [list $repo_dir/sim/tb_chirp_gen.sv $repo_dir/sim/tb_noise.sv]
 set_property top tb_chirp_gen [get_filesets sim_1]
 set_property top_lib xil_defaultlib [get_filesets sim_1]
 

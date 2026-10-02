@@ -3,6 +3,50 @@
 Adım adım İngilizce kart devreye alma rehberi (her adımda geçme kriteri ve
 sorun giderme tablosu): [bringup.md](bringup.md).
 
+## 1 Ekim: 4x interpolasyon ve inceleme düzeltmeleri
+
+- **4x interpolasyon.** RF-DAC artık 5.89824 GSPS'de 4x interpolasyonla
+  çalışır: RFDC girişi 1474.56 MSPS kompleks, 184.32 MHz fabric saatinde
+  saat başına **8 kompleks örnek (256-bit AXI4-Stream, 16 word)**. Fabric saati
+  değişmedi; NCO etrafında kullanılabilir bant ±0,4·fs_bb ≈ **±590 MHz
+  (~1,18 GHz)**, yani önceki 8x tasarımın iki katı. Chirp ve gürültü
+  bantları buna göre genişletilebilir. Eski `.bit`/`.ltx` ile çalışmaz;
+  yeniden derle.
+- **CDC kısıtı:** `noise_mode` biti `chirp_timing.xdc` içindeki max-delay/bus-skew
+  listesinde yoktu; AXI→DAC geçişi kısıtsızdı. Eklendi.
+- **Gürültü kaynağı zamanlaması:** dört seri 35-bit toplayıcı, ardışık lane
+  seçimi ve değişken LFSR ilerletmesi tek 5,4 ns'lik çevrimdeydi. Artık her
+  lane için kayıtlı `(m+1)·ninc` sabitiyle tek toplama, doğrudan seçim, sabit
+  LFSR ilerletmesi ve iki aşamalı boru hattı var (8 lane'de bile daha sığ).
+- **Tekrarlanabilirlik ve tohum:** her APPLY gürültüyü tohumdan yeniden başlatır;
+  aynı `noise` komutu öncesinde ne çalışmış olursa olsun aynı örnekleri üretir.
+  `noise ... -seed N` (PHASE0) başka, ilintisiz bir gerçekleme seçer.
+- **Çalışırken yeniden yükleme:** genlik, I/Q swap, paketleme ve gürültü seçimi
+  artık kapıyla birlikte boru hattında ilerler; yoldaki eski örnekler eski
+  ayarlarla biter, iki dalga arasında tam bir sıfır blok vardır.
+- `cw`/`chirp`/`noise`, RF bandı (NCO ± bant) 0 Hz'i veya 2949 MHz'i (ilk
+  Nyquist bölgesi) aşarsa uyarır. `plot_ila.py` 8 lane ve 1474.56 MSPS
+  varsayar (eski yakalamalar için `--lanes 4 --fs-bb 737.28e6`) ve ortalamalı
+  spektrum çizer.
+- **Timing (ilk 4x derleme WNS/TNS negatifti):** DSP çarpıcısı artık tüm iç
+  registerlarıyla (A/B, M, P), sin/cos BRAM'i çıkış registeriyle çalışıyor;
+  DSP ile RF-DAC arasına bir register daha eklendi, gürültü seçicisi düz
+  AND-OR mux oldu, yüksek fanout'lu resetler registerlandı/kaldırıldı ve
+  ILA'ya 2 giriş pipeline aşaması eklendi. Implementation, timing odaklı
+  direktiflerle çalışıyor. Her çalıştırmadan sonra
+  `vivado/zcu208_chirp/zcu208_chirp.runs/impl_1/timing_failing.txt` en kötü
+  40 path'i listeler; timing yine tutmazsa bu dosyayı gönder. Çıkış gecikmesi
+  7'den 11 saate (60 ns) çıktı, örnekler değişmedi.
+- **Asıl timing hatası (ikinci derleme):** `timing_failing.txt`, DAC veri
+  yolunun timing'i karşıladığını (en kötü +0,93 ns) gösterdi. Başarısız olan
+  yalnızca 8 path vardı: `r_ctrl_reg[1]` (AXI) → `cw_mode_reg_rep*` (DAC),
+  yaklaşık −1,05 ns. Implementation `cw_mode` registerını çoğaltmış, kopyalar
+  CDC istisnasının dışında kalmıştı. Artık aktarım tek yüklü,
+  `DONT_TOUCH` olan `cap_*` registerlarında bitiyor; jeneratör bunların DAC
+  tarafındaki kopyasını kullanıyor ve XDC `cap_*`'ı hedefliyor.
+- Ayrıntılar, testler ve donanımda kontrol edilecekler:
+  [review_2026-10-01.md](review_2026-10-01.md).
+
 ## Düzeltilen sorunlar
 
 - CLK104 referans girişinin tile 230'a bağlı olduğu varsayımı yanlıştı.
@@ -56,9 +100,9 @@ bağlandı. Yeni bitstream üret, timing/CDC raporlarını kontrol et.
   aşımı, JTAG bağlantı kaybı ve SLVERR görünmüyordu. `-quiet` kaldırıldı; hata
   artık adresle birlikte bildirilir.
 - `rfdc_status`; interpolation, I/Q giriş, datapath modu ve fabric word
-  değerlerini okur. `cw`, `chirp` ve `nco_set`, 8x / I/Q / tam bant datapath
-  dışındaki bir ayarda çalışmayı reddeder. Yalnızca tanı için:
-  `set ::RFDC_CONFIG_CHECK 0`.
+  değerlerini okur. `cw`, `chirp` ve `nco_set`, beklenen interpolasyon
+  (artık 4x) / I/Q / tam bant datapath dışındaki bir ayarda çalışmayı reddeder.
+  Yalnızca tanı için: `set ::RFDC_CONFIG_CHECK 0`.
 - `gen_off`, DAC domain'i resetteyken başarılı sayılır, çünkü reset enable'ı
   sıfırda tutar. Canlı ama onay vermeyen handshake ise hâlâ hatadır.
 
@@ -77,8 +121,8 @@ anda hem kartta hem RFDC IP'de değiştirmen gerekir.
    source tcl/build_bd.tcl
    ```
 3. RFDC IP'de tek DAC tile 228 / channel 0: PLL açık, yerel saat kaynağı tile 228,
-   referans 245.76 MHz, örnekleme 5898.24 MSPS, interpolation 8, fine mixer,
-   I/Q -> Real, AXIS başına 8 adet 16-bit değer (4 kompleks örnek), 128-bit port,
+   referans 245.76 MHz, örnekleme 5898.24 MSPS, interpolation 4, fine mixer,
+   I/Q -> Real, AXIS başına 16 adet 16-bit değer (8 kompleks örnek), 256-bit port,
    AXIS ve çıkış saati 184.32 MHz. MTS kapalıdır.
 4. Generate Bitstream çalıştır. `debug_hub.tcl` uygulama öncesi otomatik çalışır;
    hub için bağımsız `axi_clk_100m` ağını bulamazsa durur. Hook'u atlama.
@@ -106,8 +150,9 @@ clock_check
 
 Beklenen: tile **228**, state **15**, power-up **1**, PLL locked **1**,
 DAC MMCM locked **1**, handshake ready **1**, APPLY pending **0**,
-interpolation **8x**, I/Q input **1**, datapath mode **0**, değişen heartbeat.
-Raporlanan fabric word sayısını not et; bu değer henüz kartta doğrulanmadı.
+interpolation **4x**, I/Q input **1**, datapath mode **0**, değişen heartbeat.
+Raporlanan fabric word sayısını not et (beklenen 16); bu değer henüz kartta
+doğrulanmadı.
 Heartbeat frekans ölçümü değildir; yalnızca fabric saatinin hareket ettiğini gösterir.
 
 Saat profili bitstream'den sonra yüklendiyse:
@@ -137,6 +182,40 @@ chirp -bw 400e6 -pw 2e-6 -pri 10e-6 -amp 0.1
 # Yuvarlanmış süreler: PW 369 clock (~2.002 us), PRI 1843 clock (~9.999 us)
 ```
 
+Geniş bant (4x ile ~1,18 GHz'e kadar): NCO'yu tüm RF bandı hem ilk Nyquist
+bölgesine (0–2949 MHz) hem de çıkış yoluna sığacak yere koy. 500 MHz
+örneklerindeki XM655 balunu yaklaşık 10 MHz–1 GHz'i kapsar; 1 GHz'lik bir
+tarama için daha geniş bir yol gerekir.
+
+```tcl
+nco_set 1.5e9
+chirp -bw 1e9 -pw 2e-6 -pri 10e-6 -amp 0.1   ;# RF 1.0 .. 2.0 GHz
+```
+
+### Band sınırlı gürültü
+
+`noise` komutu, seçilen bant genişliğini sözde-rastgele örneklerle doldurur
+(alıcı hassasiyeti/BER testi, gürültü figürü ve kalibrasyon ölçümleri). Aynı DAC
+yolunu kullanır: merkez frekansı `nco_set`, seviyeyi `-amp` belirler, `gen_off`
+durdurur.
+
+```tcl
+nco_set 500e6
+noise -bw 200e6 -amp 0.1                       ;# sürekli, ~400..600 MHz
+# noise -bw 100e6 -amp 0.1 -pw 2e-6 -pri 10e-6 ;# darbeli gürültü
+# noise -bw 200e6 -amp 0.1 -seed 7             ;# başka bir gürültü gerçeklemesi
+```
+
+Her `D = fs_bb/bw` örnekte yeni bir rastgele değer çekilip aradaki örneklerde
+tutulur (örnekle-tut), bu yüzden band ~±`bw`/2 genişliğinde (−3 dB) ve sinc²
+zarflıdır (ilk sıfırlar ±`bw`). RFDC interpolasyon filtresi yaklaşık ±0.4·fs_bb
+(±590 MHz) geçirir; ~1,18 GHz'e kadar bant kullanılabilir. Analizörde `Average`
+ile merkez (~500 MHz) etrafında yükselen bir gürültü tabanı görülür.
+`plot_ila.py` çıktısının en alttaki **Spectrum (dB)** paneli (ortalamalı spektrum)
+bandı ve şeklini gösterir; anlık frekans paneli gürültüde anlamsızdır. Her
+`noise` komutu diziyi tohumdan yeniden başlatır: aynı komut her zaman aynı
+örnekleri üretir; `-seed` başka bir gerçekleme seçer.
+
 ## 3. ILA'da grafik
 
 ```tcl
@@ -146,23 +225,23 @@ ila_capture out/chirp.csv
 # ila_capture out/cw.csv immediate
 ```
 
-4096 saatlik kayıt yaklaşık 22.22 us içerir; 4 örnek/saat ile 16384 kompleks
+4096 saatlik kayıt yaklaşık 22.22 us içerir; 8 örnek/saat ile 32768 kompleks
 örnek elde edilir. Normal capture tüm saatleri alır; capture qualification veya
 çoklu pencere ekleme, yoksa aralardaki süreyi CSV'den yeniden kurmak gerekir.
 
 | ILA probu | İçerik |
 |---|---|
-| probe0 | 128-bit DAC giriş verisi |
+| probe0 | 256-bit DAC giriş verisi |
 | probe1 | darbe işareti (`mon_gate`, `trig_out` ile aynı) |
 | probe2 / probe3 | TVALID / TREADY |
 | probe4 / probe5 | I0 / Q0 |
 | probe6 / probe7 | I1 / Q1 |
-| probe8 / probe9 | I2 / Q2 |
-| probe10 / probe11 | I3 / Q3 |
+| … | … |
+| probe18 / probe19 | I7 / Q7 |
 
 Vivado dalga penceresinde 16-bit probları seç: **Radix > Signed Decimal**,
-**Waveform Style > Analog**. Tek bir lane yalnızca her dördüncü örneği gösterir;
-400 MHz genişlikli chirp'i tek lane'den frekans olarak yorumlamak aliasing üretir.
+**Waveform Style > Analog**. Tek bir lane yalnızca her sekizinci örneği gösterir;
+geniş bir chirp'i tek lane'den frekans olarak yorumlamak aliasing üretir.
 Doğru zaman grafiği için tüm lane'leri birleştiren araç:
 
 ```sh
@@ -170,7 +249,9 @@ python -m pip install -r sim/requirements.txt
 python scripts/plot_ila.py out/chirp.csv
 ```
 
-`out/chirp.png` I/Q, darbe işareti ve anlık baseband frekansını gösterir.
+`out/chirp.png` I/Q, darbe işareti, anlık baseband frekansı ve ortalamalı
+spektrumu gösterir. Eski 8x derlemeden alınmış bir CSV için
+`--lanes 4 --fs-bb 737.28e6` ver.
 Adları farklı bir CSV'de `--data-column`, `--gate-column`, `--valid-column`,
 `--ready-column` ile tam sütun adlarını verebilirsin. Bilinmeyen veriler ve
 TREADY/TVALID düşük satırlar hata sayılır; zaman ekseni satır silinerek sıkıştırılmaz.
@@ -183,9 +264,10 @@ gecikmesini içermeyen dijital darbe işaretidir.
 
 ## 4. Doğrulama sınırı ve kaynaklar
 
-29 Eylül Verilator testinde 48.840 RTL örneği sıfır uyuşmazlıkla geçti; frekans/darbe analizinde
-10/10 kontrol ve CSV ayrıştırıcısında 6/6 test başarılı oldu. Tcl kontrol
-testleri de geçti. [Örnek grafik](chirp_interleaved_sim.png) RTL simülasyonudur.
+1 Ekim'de (4x, 8 lane) Icarus ve Verilator'da 94.944 chirp örneği ve 148.184
+gürültü örneği bit-exact modelle sıfır uyuşmazlıkla geçti; Python analizinde
+14/14 kontrol, CSV ayrıştırıcısında 10/10 test ve Tcl kontrol testleri başarılı
+oldu. [Örnek grafik](chirp_interleaved_sim.png) (1 GHz chirp) RTL simülasyonudur.
 Bu testler RTL örneklerini ve Tcl/Python davranışını sınar. RFDC/ILA IP
 üretimi, synthesis, timing closure ve kart ölçümü Vivado + ZCU208 üzerinde
 ayrıca çalıştırılmalıdır. Bu depoda yeni bir doğrulanmış bitstream verilmez.

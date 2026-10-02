@@ -28,6 +28,7 @@ puts "INFO: using board part $bp"
 
 add_files -norecurse [list \
     $repo_dir/rtl/sincos_qw_rom.sv \
+    $repo_dir/rtl/noise_src.sv \
     $repo_dir/rtl/chirp_core.sv \
     $repo_dir/rtl/chirp_axil_regs.sv \
     $repo_dir/rtl/chirp_gen_top.sv \
@@ -42,6 +43,25 @@ if {$ADD_ILA} {
     add_files -fileset utils_1 -norecurse $repo_dir/tcl/debug_hub.tcl
     set_property STEPS.OPT_DESIGN.TCL.PRE $repo_dir/tcl/debug_hub.tcl [get_runs impl_1]
 }
+# After routing, write timing reports (timing_failing.txt lists the worst
+# paths) into the impl_1 run directory.
+add_files -fileset utils_1 -norecurse $repo_dir/tcl/timing_report.tcl
+set_property STEPS.ROUTE_DESIGN.TCL.POST $repo_dir/tcl/timing_report.tcl [get_runs impl_1]
+# Timing-driven implementation for the 256-bit, 184.32 MHz DAC datapath:
+# stronger placement/routing directives and post-route physical optimization.
+foreach {prop val} {
+    STEPS.OPT_DESIGN.ARGS.DIRECTIVE                 Explore
+    STEPS.PLACE_DESIGN.ARGS.DIRECTIVE               ExtraTimingOpt
+    STEPS.PHYS_OPT_DESIGN.IS_ENABLED                true
+    STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE            AggressiveExplore
+    STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE               AggressiveExplore
+    STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED     true
+    STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore
+} {
+    if {[catch {set_property $prop $val [get_runs impl_1]} err]} {
+        puts "WARNING: could not set impl_1 $prop = $val: $err"
+    }
+}
 update_compile_order -fileset sources_1
 
 # ------------------------------------------------------------ block design
@@ -52,6 +72,8 @@ create_bd_design $bd_name
 # without tile forwarding. Matches a DAC-228 sine design that ran on the
 # target board (clock source Tile228, distribution off, 245.76 MHz reference).
 # Units follow the IP: sampling rate in GSPS, NCO in GHz, clocks in MHz.
+# 4x interpolation: 1474.56 MSPS complex in, 16 16-bit words (8 I/Q pairs,
+# 256 bits) per 184.32 MHz fabric clock: 5898.24 / 4 * 2 / 16 = 184.32.
 set rfdc [create_bd_cell -type ip -vlnv xilinx.com:ip:usp_rf_data_converter rfdc]
 set rfdc_cfg [list \
     CONFIG.Axiclk_Freq             100.000 \
@@ -66,8 +88,8 @@ set rfdc_cfg [list \
     CONFIG.DAC0_Multi_Tile_Sync    false \
     CONFIG.DAC_Slice00_Enable      true \
     CONFIG.DAC_Data_Type00         0 \
-    CONFIG.DAC_Interpolation_Mode00 8 \
-    CONFIG.DAC_Data_Width00        8 \
+    CONFIG.DAC_Interpolation_Mode00 4 \
+    CONFIG.DAC_Data_Width00        16 \
     CONFIG.DAC_Mixer_Type00        2 \
     CONFIG.DAC_Mixer_Mode00        0 \
     CONFIG.DAC_NCO_Freq00          0.5 \
@@ -171,16 +193,20 @@ create_bd_port -dir O trig_out
 connect_bd_net [get_bd_pins chirp_gen_0/trig_out] [get_bd_ports trig_out]
 
 # Native ILA avoids System ILA monitor-slot type/version mismatches.
-# Full stream + handshake + pulse marker and eight signed 16-bit lane probes.
+# Full stream + handshake + pulse marker and sixteen signed 16-bit lane probes
+# (I0, Q0, ..., I7, Q7).
 # ILA samples in the DAC domain; debug_hub.tcl keeps the hub on independent AXI.
 # The IP-integrator ILA defaults to AXI-monitor mode, which ignores the native
 # probe widths; select native mode explicitly. Probes use chirp_gen_0/mon_*:
 # a net on an m_axis pin would detach that pin from the RFDC stream.
-set ila_widths [list 128 1 1 1 16 16 16 16 16 16 16 16]
+# Two input pipeline stages let the 515 probe bits reach the ILA's block RAMs
+# (about 60 of them, spread over several columns) at 184.32 MHz.
+set ila_widths [concat [list 256 1 1 1] [lrepeat 16 16]]
 if {$ADD_ILA} {
     set ila [create_bd_cell -type ip -vlnv xilinx.com:ip:ila ila_dac]
     set cfg [list CONFIG.C_ENABLE_ILA_AXI_MON false CONFIG.C_MONITOR_TYPE Native \
-        CONFIG.C_NUM_OF_PROBES [llength $ila_widths] CONFIG.C_DATA_DEPTH 4096]
+        CONFIG.C_NUM_OF_PROBES [llength $ila_widths] CONFIG.C_DATA_DEPTH 4096 \
+        CONFIG.C_INPUT_PIPE_STAGES 2]
     set n 0
     foreach w $ila_widths { lappend cfg CONFIG.C_PROBE${n}_WIDTH $w; incr n }
     set_property -dict $cfg $ila
@@ -188,9 +214,9 @@ if {$ADD_ILA} {
     foreach {probe signal} {0 mon_data 1 mon_gate 2 mon_valid 3 mon_ready} {
         connect_bd_net [get_bd_pins chirp_gen_0/$signal] [get_bd_pins ila_dac/probe$probe]
     }
-    for {set n 0} {$n < 8} {incr n} {
+    for {set n 0} {$n < 16} {incr n} {
         set slice [create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice iq_slice_$n]
-        set_property -dict [list CONFIG.DIN_WIDTH 128 CONFIG.DIN_FROM [expr {16*$n+15}] \
+        set_property -dict [list CONFIG.DIN_WIDTH 256 CONFIG.DIN_FROM [expr {16*$n+15}] \
             CONFIG.DIN_TO [expr {16*$n}] CONFIG.DOUT_WIDTH 16] $slice
         connect_bd_net [get_bd_pins chirp_gen_0/mon_data] [get_bd_pins iq_slice_$n/Din]
         connect_bd_net [get_bd_pins iq_slice_$n/Dout] [get_bd_pins ila_dac/probe[expr {$n+4}]]
@@ -215,7 +241,10 @@ regenerate_bd_layout
 validate_bd_design
 set stream [get_bd_intf_pins rfdc/s00_axis]
 set nb [get_property CONFIG.TDATA_NUM_BYTES $stream]
-if {$nb != 16} { error "RFDC stream must be 128 bits, got $nb bytes" }
+if {$nb != 32} { error "RFDC stream must be 256 bits (8 I/Q samples), got $nb bytes" }
+# The generator declares its own width (chirp_gen_wrapper.v X_INTERFACE_PARAMETER).
+set gb [get_property CONFIG.TDATA_NUM_BYTES [get_bd_intf_pins chirp_gen_0/m_axis]]
+if {$gb != $nb} { error "chirp_gen_0/m_axis declares $gb bytes, RFDC expects $nb" }
 set fabric [get_property CONFIG.DAC0_Fabric_Freq $rfdc]
 if {abs($fabric - 184.32) > 0.001} { error "RFDC requires $fabric MHz, expected 184.32 MHz" }
 # The generator must drive the RFDC through the interface connection.
@@ -243,7 +272,7 @@ update_compile_order -fileset sources_1
 
 puts "=================================================================="
 puts " Block design ready."
-puts " 1. Double-click rfdc: only DAC tile 228 ch0 enabled (see settings above)."
+puts " 1. Double-click rfdc: only DAC tile 228 ch0 enabled, 4x interpolation, 256-bit AXIS."
 puts " 2. trig_out is on LED0 (AR19); change it in the XDC if you want another pin."
 puts " 3. Flow Navigator > Generate Bitstream."
 puts "=================================================================="

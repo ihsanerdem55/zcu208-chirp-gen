@@ -5,7 +5,7 @@
 // The X_INTERFACE attributes make Vivado infer s_axi / m_axis bus interfaces.
 // -----------------------------------------------------------------------------
 module chirp_gen_wrapper #(
-    parameter LANES  = 4,
+    parameter LANES  = 8,
     parameter ADDR_W = 16
 ) (
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 s_axi_aclk CLK" *)
@@ -47,8 +47,15 @@ module chirp_gen_wrapper #(
     (* X_INTERFACE_INFO = "xilinx.com:signal:reset:1.0 dac_rst_n RST" *)
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_LOW" *)
     input  wire                  dac_rst_n,
+    // m_axis is declared explicitly so that it carries TDATA_NUM_BYTES itself;
+    // otherwise validation copies it from the RF-DAC and reports [BD 41-926].
+    // 32 bytes = LANES (8) x 4; keep it equal to LANES*4 if LANES changes.
+    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TDATA" *)
+    (* X_INTERFACE_PARAMETER = "XIL_INTERFACENAME m_axis, TDATA_NUM_BYTES 32" *)
     output wire [LANES*32-1:0]   m_axis_tdata,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TVALID" *)
     output wire                  m_axis_tvalid,
+    (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 m_axis TREADY" *)
     input  wire                  m_axis_tready,
     output wire                  trig_out,
 
