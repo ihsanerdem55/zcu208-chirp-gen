@@ -10,11 +10,10 @@ the earlier 8x build). Vivado JTAG-to-AXI control; no Vitis/PetaLinux required.
 Tile 230 uses a separate external SMA clock path. The original tile-230 assumption
 and default split-I/Q packing were incorrect for this setup.
 
-**Board readiness:** the branch includes reset/CDC fixes, but still requires a
-fresh Vivado build, timing/CDC review and a controlled RF measurement. See the
-[29 September review and bring-up checks](docs/review_2026-09-29.md) and the
+**Status:** the 4x build has been implemented in Vivado and verified working on
+a ZCU208 board. The reset/CDC fixes and bring-up checks are described in the
+[29 September review](docs/review_2026-09-29.md) and the
 [1 October review and 4x interpolation notes](docs/review_2026-10-01.md).
-The 4x build has not yet been through Vivado implementation.
 DAC-domain reset now leaves output disabled until a fresh APPLY; a tile restart
 also leaves output off. The DAC fabric-clock MMCM is supervised from the
 independent AXI clock: it is reset automatically until it relocks (late CLK104
